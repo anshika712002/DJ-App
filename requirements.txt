@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+spleeter
+demucs
+librosa
+ffmpeg
+numpy
+pydub
+torch
+transformers
