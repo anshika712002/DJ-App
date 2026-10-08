@@ -1,7 +1,24 @@
+# Python environments (the project uses .venv)
 venv/
+env/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+*.egg-info/
+
+# Secrets / local configuration
 .env
+.env.*
+
+# Logs
 *.log
+
+# Runtime media produced by the backend
+music_backend/audius_downloads/
+music_backend/uploads/
+uploads/
+outputs/
+music_backend/cookies.txt
