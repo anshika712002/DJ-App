@@ -19,9 +19,14 @@ APP_NAME = "djapp"
 # FINAL USER-REQUESTED FOLDER PATHS
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ORIGINAL DOWNLOADED AUDIO FOLDER (ABSOLUTE PATH)
-AUDIUS_DOWNLOADS_FOLDER = r"C:\Users\Dell\Desktop\Audius API\music_backend\audius_downloads"
+# Downloaded Audius source tracks (project-relative, machine independent)
+AUDIUS_DOWNLOADS_FOLDER = os.path.join(BASE_DIR, "audius_downloads")
+
+# Mixed audio output, also exposed as static /audio
+MIXED_AUDIO_FOLDER = os.path.join(BASE_DIR, "uploads", "mixed_audio")
+
 os.makedirs(AUDIUS_DOWNLOADS_FOLDER, exist_ok=True)
+os.makedirs(MIXED_AUDIO_FOLDER, exist_ok=True)
 
 os.environ["PYDUB_FFMPEG_LOGLEVEL"] = "quiet"
 
@@ -119,15 +124,15 @@ def overlay_beat(main_path: str, beat_path: str, out_path: str, bg_db: int = BG_
 # ------------------------------------------------------------
 # 🔍 Audius Search
 # ------------------------------------------------------------
-def search_audius_tracks(query: str, limit: int = 5):
+async def search_audius_tracks(query: str, limit: int = 5):
     url = f"{AUDIUS_API_BASE}/tracks/search"
     params = {"query": query, "limit": limit}
 
     try:
-        response = httpx.get(url, params=params)
-        response.raise_for_status()
-
-        data = response.json().get("data", [])
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json().get("data", [])
 
         return [
             {

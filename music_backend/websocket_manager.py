@@ -1,34 +1,42 @@
 from fastapi.websockets import WebSocket, WebSocketDisconnect
-connected_clients = [] 
+
+connected_clients = []
+
 
 async def handle_websocket(websocket: WebSocket):
     await websocket.accept()
-    connected_clients.add(websocket)
+    connected_clients.append(websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         print("Client disconnected")
     finally:
-        connected_clients.remove(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+
 
 async def broadcast_message(message: dict):
-    for client in connected_clients:
+    # Iterate a copy: a dead client is removed inside the loop
+    for client in list(connected_clients):
         try:
             await client.send_json(message)
         except Exception:
             print("⚠️ WebSocket connection lost. Removing client.")
-            connected_clients.remove(client)
+            if client in connected_clients:
+                connected_clients.remove(client)
+
 
 async def broadcast_song_request(song_request):
+    status = song_request.status
     message = {
         "action": "new_song_request",
         "data": {
-            "song_name": song_request.song_name,
-            "artist": song_request.artist,
-            "mixed_audio": song_request.mixed_audio_path,
-            "custom_lyrics": song_request.custom_lyrics,
-            "status": song_request.status.value
+            "songRequestId": song_request.id,
+            "songName": song_request.songName,
+            "artist": song_request.videoArtist1,
+            "mixedAudioPath": song_request.mixedAudioPath,
+            "status": status.value if hasattr(status, "value") else str(status),
         }
     }
     await broadcast_message(message)

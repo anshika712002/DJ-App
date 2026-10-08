@@ -1,33 +1,45 @@
-# from sqlalchemy import Column, Integer, String, Enum
-from sqlalchemy.ext.asyncio import create_async_engine,AsyncSession
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-import os
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import declarative_base
 from dotenv import load_dotenv
+from pathlib import Path
+import os
 
-load_dotenv()
+# Load .env from the project root (and music_backend/ if present) so the app
+# works no matter whether it is started from the repo root or music_backend/.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL is missing. Check your .env file.")
-    
-# ✅ Create Async Engine
+    raise ValueError("DATABASE_URL is missing. Check your .env file.")
+
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+ECHO_SQL = os.getenv("ECHO_SQL", "false").lower() in ("1", "true", "yes")
+
 async_engine = create_async_engine(
-    DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"),
-    echo=True,
-    pool_pre_ping=True,    
-    pool_recycle=3600
+    DATABASE_URL,
+    echo=ECHO_SQL,
+    pool_pre_ping=True,
+    pool_recycle=3600,
 )
 
-# ✅ Create Async Session
-AsyncSessionLocal = sessionmaker(
+AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,
     class_=AsyncSession,
-    expire_on_commit=False
+    expire_on_commit=False,
 )
+
 Base = declarative_base()
 
+
 async def get_db():
+    """FastAPI dependency: one AsyncSession per request, rollback on error."""
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise

@@ -1,11 +1,22 @@
+import sys
+
+# Windows consoles/pipes default to cp1252; the app logs emoji/UTF-8.
+# Reconfigure before any module prints so startup cannot crash with
+# UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # import asyncio
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends,WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi import Query, Header
-from fastapi.staticfiles import StaticFiles
 import os
 # from sqlalchemy.ext.asyncio import AsyncSession
 # from database import get_db
@@ -16,38 +27,65 @@ from song_requests import song_request_router
 from websocket_manager import connected_clients
 from sqlalchemy import text 
 from database import AsyncSessionLocal
+from auth_utils import decode_access_token
 
 print("✅ FastAPI server is starting...") 
 
-app = FastAPI()
-app.mount("/audio",StaticFiles(directory=os.path.join("uploads", "mixed_audio")), name="audio")
+REQUIRED_TABLES = (
+    "users", "role_master", "restaurants", "song_requests",
+    "cached_songs", "downloaded_audios", "refresh_tokens", "user_search_history",
+)
 
-@app.on_event("startup")
-async def on_startup():
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("✅ Database tables created!")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Schema is owned by Alembic (never create_all here) so migrations stay authoritative.
     try:
         async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
-        print("✅ DB connection warmed up at startup")
+            rows = await session.execute(
+                text("select tablename from pg_tables where schemaname='public'")
+            )
+            existing = {r[0] for r in rows}
+        missing = [t for t in REQUIRED_TABLES if t not in existing]
+        if missing:
+            print(f"❌ Database schema incomplete. Missing tables: {missing}")
+            print("   Run: .venv\\Scripts\\alembic.exe upgrade head")
+        else:
+            print("✅ Database connected, schema OK (managed by Alembic)")
     except Exception as e:
-        print("❌ Failed to warm up DB:", str(e))
+        print("❌ Failed to connect to the database:", e)
+        print("   Check DATABASE_URL in .env and that PostgreSQL is running "
+              "(scripts\\start_postgres.ps1)")
+    yield
+    await async_engine.dispose()
+
+
+app = FastAPI(lifespan=lifespan)
+
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8081",   
-        "http://4.247.144.6",        
-    ],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    # No cookies are used (auth is a Bearer header), so credentials stay off
+    # and the wildcard origin is safe. Explicit headers are required because
+    # the CORS spec does not apply "*" to the Authorization header.
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
+# The queue feed carries requester names, tips and song titles, so the socket
+# is gated by the same JWT used for the REST API (?token=<access token>).
 @app.websocket("/ws/dj")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=None)):
+    if not token or not decode_access_token(token):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
     await websocket.accept()
     connected_clients.append(websocket)
     try:
@@ -56,7 +94,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        connected_clients.remove(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 

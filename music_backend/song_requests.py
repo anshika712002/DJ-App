@@ -44,8 +44,12 @@ from process_audio import (
     mix_audio,
     overlay_beat,
     search_audius_tracks,
-    get_audius_track_details
+    get_audius_track_details,
+    AUDIUS_DOWNLOADS_FOLDER,
+    MIXED_AUDIO_FOLDER
 )
+
+from websocket_manager import broadcast_song_request, broadcast_message
 
 from schemas import (
     SongInfo,
@@ -55,18 +59,14 @@ from schemas import (
     StatusUpdateSchema
 )
 
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
 
-ORIGINAL_AUDIO_FOLDER = r"C:\Users\Dell\Desktop\Audius API\music_backend\audius_downloads"
-MIXED_AUDIO_FOLDER    = r"C:\Users\Dell\Desktop\Audius API\music_backend\uploads\mixed_audio"
+ORIGINAL_AUDIO_FOLDER = AUDIUS_DOWNLOADS_FOLDER
 
-os.makedirs(ORIGINAL_AUDIO_FOLDER, exist_ok=True)
-os.makedirs(MIXED_AUDIO_FOLDER, exist_ok=True)
-
-PUBLIC_API_BASE = os.getenv("PUBLIC_API_BASE", "http://4.247.144.6:8085")
+PUBLIC_API_BASE = os.getenv("PUBLIC_API_BASE", "")
 
 song_request_router = APIRouter()
 logging.basicConfig(level=logging.INFO)
@@ -85,6 +85,15 @@ VALID_MIXERS = {
 }
 
 AUDIUS_API_BASE = "https://discoveryprovider.audius.co/v1"
+
+
+async def _notify_clients(message: dict):
+    """Best-effort realtime push; never let a dead socket break an API call."""
+    try:
+        await broadcast_message(message)
+    except Exception as e:
+        logger.warning("WebSocket broadcast failed: %s", e)
+
 
 async def _get_user(db: AsyncSession, userName: str, roleName: str):
     stmt = (
@@ -156,9 +165,21 @@ async def download_and_mix(
     if not user:
         raise HTTPException(404, "User not found")
 
-    valid_paths = await asyncio.gather(
-        *[download_audius_audio(t, ORIGINAL_AUDIO_FOLDER) for t in trackIds]
+    download_results = await asyncio.gather(
+        *[download_audius_audio(t, ORIGINAL_AUDIO_FOLDER) for t in trackIds],
+        return_exceptions=True,
     )
+    failed_tracks = [
+        tid for tid, res in zip(trackIds, download_results)
+        if isinstance(res, BaseException)
+    ]
+    if failed_tracks:
+        logger.warning("Audius download failed for tracks: %s", failed_tracks)
+        raise HTTPException(
+            400,
+            "These tracks are not available for streaming/download: "
+            + ", ".join(failed_tracks),
+        )
 
     selected_mixer = mixer if mixer in VALID_MIXERS else "overlay"
 
@@ -185,6 +206,11 @@ async def download_and_mix(
     db.add(new_req)
     await db.commit()
     await db.refresh(new_req)
+
+    try:
+        await broadcast_song_request(new_req)
+    except Exception as e:
+        logger.warning("WebSocket broadcast failed: %s", e)
 
     final_filename = f"{'_'.join(trackIds)}_{selected_mixer}.mp3"
     final_path = os.path.join(MIXED_AUDIO_FOLDER, final_filename)
@@ -251,9 +277,16 @@ async def download_mixed_audio(filename: str, request: Request):
     if not token or not decode_access_token(token):
         raise HTTPException(401, "Unauthorized")
 
-    file_path = os.path.join(MIXED_AUDIO_FOLDER, filename)
+    # Reject anything that escapes the mixed-audio folder (path traversal)
+    safe_name = os.path.basename(filename)
+    folder = os.path.abspath(MIXED_AUDIO_FOLDER)
+    file_path = os.path.abspath(os.path.join(folder, safe_name))
 
-    if not os.path.exists(file_path):
+    if (
+        not file_path.startswith(folder + os.sep)
+        or not file_path.lower().endswith(".mp3")
+        or not os.path.isfile(file_path)
+    ):
         raise HTTPException(404, "File not found")
 
     return FileResponse(path=file_path, media_type="audio/mpeg")
@@ -535,7 +568,7 @@ async def get_suggested_songs(
 
     keyword = search_terms[-1] if search_terms else "trending music"
 
-    tracks = search_audius_tracks(keyword, limit=10)
+    tracks = await search_audius_tracks(keyword, limit=10)
     return {"results": tracks}
 
 
@@ -556,6 +589,7 @@ async def accept_song_request(
 
     request_obj.status = RequestStatus.ACCEPTED
     await db.commit()
+    await _notify_clients({"action": "status_update", "data": {"songRequestId": request_id, "status": RequestStatus.ACCEPTED.value}})
     return {"status": "success", "message": f"Song request {request_id} accepted"}
 
 
@@ -576,6 +610,7 @@ async def reject_song_request(
 
     request_obj.status = RequestStatus.REJECTED
     await db.commit()
+    await _notify_clients({"action": "status_update", "data": {"songRequestId": request_id, "status": RequestStatus.REJECTED.value}})
     return {"status": "success", "message": f"Song request {request_id} rejected"}
 
 
@@ -600,12 +635,21 @@ async def update_song_status(
         raise HTTPException(status_code=404, detail="Song request not found")
 
     if status_data.status in [RequestStatus.PLAYING, RequestStatus.PLAYED]:
-        song_request.playedAt = datetime.utcnow()
+        song_request.playedAt = datetime.now(timezone.utc)
 
     old_status = song_request.status
     song_request.status = status_data.status
     await db.commit()
     await db.refresh(song_request)
+
+    await _notify_clients({
+        "action": "status_update",
+        "data": {
+            "songRequestId": request_id,
+            "status": status_data.status.value,
+            "previousStatus": old_status.value if old_status else None
+        }
+    })
 
     logger.info(f"🎧 Updated song request {request_id} from {old_status} → {status_data.status}")
 
@@ -614,7 +658,7 @@ async def update_song_status(
         songName=song_request.songName,
         songName2=song_request.songName2,
         status=song_request.status,
-        mixed_audio_url=f"{PUBLIC_API_BASE}/requests/audio/{os.path.basename(song_request.mixedAudioPath)}"
+        mixedAudioUrl=f"{PUBLIC_API_BASE}/requests/audio/{os.path.basename(song_request.mixedAudioPath)}"
         if song_request.mixedAudioPath else None,
         tipAmount=song_request.tipAmount
     )

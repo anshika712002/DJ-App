@@ -10,6 +10,11 @@ from enum import Enum
 from sqlalchemy.dialects.postgresql import JSONB
 
 
+def utcnow():
+    """Naive UTC timestamp (avoids deprecated datetime.utcnow)."""
+    return datetime.now().replace(microsecond=0)
+
+
 class RequestStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
@@ -31,7 +36,7 @@ class Restaurant(Base):
     email = Column(String(100), nullable=True)
     isActive = Column(Boolean, default=True)
     createdAt = Column(DateTime, default=func.now())
-    updatedAt = Column(DateTime, default=func.now())
+    updatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     roles = relationship("RoleMaster", back_populates="restaurant")
 
@@ -111,19 +116,20 @@ class SongRequest(Base):
     songName = Column(String, nullable=True)
     songName2 = Column(String, nullable=True)
     tipAmount = Column(Float, nullable=True)
-    requesterId = Column(Integer, ForeignKey("users.id"), nullable=True)
+    requesterId = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
     status = Column(
-        SAEnum(RequestStatus, name="requeststatus", create_type=False, values_callable=lambda enum: [e.value for e in enum]),
+        SAEnum(RequestStatus, name="requeststatus", values_callable=lambda enum: [e.value for e in enum]),
         nullable=False,
-        default=RequestStatus.PENDING.value
+        default=RequestStatus.PENDING.value,
+        index=True
     )
 
     mixedAudioPath = Column(String, nullable=True)
     mixedAudioData = Column(LargeBinary, nullable=True)
     videoIds = Column(String, nullable=True)
     mixer = Column(String, nullable=True, default="overlay")
-    createdAt = Column(DateTime, default=datetime.utcnow)
+    createdAt = Column(DateTime, default=utcnow, index=True)
     playedAt = Column(DateTime(timezone=True), nullable=True)
 
     videoTitle1 = Column(String, nullable=True)
@@ -156,7 +162,7 @@ class RefreshToken(Base):
     jti = Column(String, unique=True, nullable=False)
     userId = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     token = Column(Text, nullable=False)
-    createdAt = Column(DateTime, default=datetime.utcnow)
+    createdAt = Column(DateTime, default=utcnow)
     expiresAt = Column(DateTime, nullable=False)
     revoked = Column(Boolean, default=False)
 
