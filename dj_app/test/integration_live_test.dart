@@ -81,7 +81,7 @@ void main() {
     expect(store.data!['role'], 'user');
   });
 
-  test('live backend: search reaches Audius through the API', () async {
+  test('live backend: search reaches YouTube through the API', () async {
     final probe = ApiClient();
     final online = await probe
         .get('/')
@@ -109,14 +109,19 @@ void main() {
     try {
       final results = await api.search('funk');
       for (final song in results) {
-        expect(song.videoId, isNotEmpty);
+        expect(song.trackId, isNotEmpty);
+        expect(song.sourceType, 'youtube');
+        expect(song.playbackUrl, startsWith('https://www.youtube.com/watch?v='));
+        expect(song.mixEligible, isA<bool>());
       }
+      final assets = await api.searchAssets('');
+      expect(assets, isA<List<Song>>());
       final suggested = await api.suggested();
       expect(suggested, isA<List<Song>>());
     } on ApiException catch (e) {
-      // Audius outages are outside this repo's control.
+      // YouTube Data API availability and quota are outside this repo's control.
       // ignore: avoid_print
-      print('SKIP Audius-backed checks: ${e.message}');
+      print('SKIP YouTube-backed checks: ${e.message}');
     }
   });
 }

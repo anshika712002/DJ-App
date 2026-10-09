@@ -115,7 +115,7 @@ class RequestCard extends StatelessWidget {
   String get _title {
     if (item.mixSongTitle.trim().isNotEmpty) return item.mixSongTitle.trim();
     if (item.songs.isNotEmpty) {
-      return item.songs.map((s) => s.title ?? s.videoId).join(' + ');
+      return item.songs.map((s) => s.title ?? s.trackId).join(' + ');
     }
     return 'Mix #${item.id}';
   }

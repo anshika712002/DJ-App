@@ -24,5 +24,20 @@ Future<void> playUrl(String url) async {
   _playing = true;
 }
 
+Future<void> openExternalUrl(String url) async {
+  if (!Platform.isWindows) {
+    throw UnsupportedError(
+        'Opening external links on ${Platform.operatingSystem} is not supported.');
+  }
+  final result = await Process.run('rundll32', [
+    'url.dll,FileProtocolHandler',
+    url,
+  ]);
+  if (result.exitCode != 0) {
+    throw ProcessException('rundll32', ['url.dll,FileProtocolHandler', url],
+        result.stderr.toString(), result.exitCode);
+  }
+}
+
 /// The external player is not under our control, so this only resets the flag.
 void stopAudio() => _playing = false;

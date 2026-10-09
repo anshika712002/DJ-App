@@ -86,32 +86,41 @@ class AuthSession {
 }
 
 class Song {
-  final String videoId;
+  final String trackId;
+  final String sourceType;
   final String? title;
-  final String? artistName;
-  final String? thumbnail;
+  final String? artist;
+  final String? artwork;
   final int? duration;
-  final String? genre;
-  final bool downloadAble;
+  final String? playbackUrl;
+  final bool mixEligible;
+  final String? license;
+  final String? attribution;
 
   const Song({
-    required this.videoId,
+    required this.trackId,
+    this.sourceType = 'youtube',
     this.title,
-    this.artistName,
-    this.thumbnail,
+    this.artist,
+    this.artwork,
     this.duration,
-    this.genre,
-    this.downloadAble = true,
+    this.playbackUrl,
+    this.mixEligible = false,
+    this.license,
+    this.attribution,
   });
 
   factory Song.fromJson(Map<String, dynamic> json) => Song(
-        videoId: (json['videoId'] ?? json['trackId'] ?? json['id']) as String,
+        trackId: (json['trackId'] ?? json['videoId'] ?? json['id']) as String,
+        sourceType: json['sourceType'] as String? ?? 'youtube',
         title: json['title'] as String?,
-        artistName: (json['artistName'] ?? json['artist']) as String?,
-        thumbnail: (json['thumbnail'] ?? json['artwork']) as String?,
+        artist: (json['artist'] ?? json['artistName']) as String?,
+        artwork: (json['artwork'] ?? json['thumbnail']) as String?,
         duration: (json['duration'] as num?)?.toInt(),
-        genre: json['genre'] as String?,
-        downloadAble: json['downloadAble'] as bool? ?? true,
+        playbackUrl: json['playbackUrl'] as String?,
+        mixEligible: json['mixEligible'] as bool? ?? json['downloadAble'] as bool? ?? false,
+        license: json['license'] as String?,
+        attribution: json['attribution'] as String?,
       );
 }
 
@@ -168,4 +177,3 @@ const List<String> kMixers = [
   'beat-overlay',
   'without-mixing',
 ];
-

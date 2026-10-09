@@ -1,8 +1,8 @@
 # DJ App
 
-A full-stack song-request app: listeners search a live music catalogue and request a
-mix, the DJ dashboard accepts/plays it, and the backend mixes the audio in the
-background and streams it back.
+A full-stack song-request app: listeners discover YouTube playback results and
+request mixes from server-managed local or licensed audio assets. The DJ dashboard
+accepts/plays requests, and the backend mixes eligible audio in the background.
 
 | Layer     | Tech |
 |-----------|------|
@@ -23,8 +23,8 @@ DJ-App/
 │   ├── main.py             app factory, lifespan, CORS, websocket
 │   ├── auth.py / user.py   signup, login, refresh, profile
 │   ├── song_requests.py    search, request, queue, status, audio streaming
-│   ├── process_audio.py    downloads + ffmpeg mixing
-│   ├── models.py           SQLAlchemy models (8 tables)
+│   ├── process_audio.py    ffmpeg-based audio mixing
+│   ├── models.py           SQLAlchemy models
 │   └── schemas.py          Pydantic request/response models
 ├── alembic/                migrations (baseline schema + role seed)
 ├── scripts/
@@ -74,9 +74,27 @@ DATABASE_URL=postgresql+asyncpg://djapp:<password>@127.0.0.1:5432/djapp_db
 SECRET_KEY=<long random string>
 PUBLIC_API_BASE=
 CORS_ORIGINS=*
+YOUTUBE_API_KEY=<YouTube Data API v3 key>
+YOUTUBE_ALLOWED_CHANNEL_IDS=UCxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 * `PUBLIC_API_BASE` empty ⇒ media URLs are returned relative (`/requests/audio/...`).
+* Search uses YouTube Data API v3. YouTube results are playback/discovery
+  tracks with a YouTube watch URL and no server audio-download URL. Audio
+  processing through the existing authorized YouTube path is limited to the
+  comma-separated channel IDs in `YOUTUBE_ALLOWED_CHANNEL_IDS`; add only
+  channels whose videos you own or are authorized to process. The API key
+  enables search and metadata access; it does not authorize downloading or
+  processing audio. Other YouTube results can be played on YouTube but cannot
+  be mixed.
+* Authenticated users can upload audio through `POST /tracks/assets` (also
+  available in Swagger). The uploader must confirm their rights and provide
+  the license and attribution. `local` assets are private to the uploader;
+  `licensed` and `public_domain` assets are available in the shared catalog.
+  Files are stored under a server-generated name in `music_backend/audio_assets`
+  (or the configured `AUDIO_ASSET_DIR`), never at a client-supplied path.
+  The singular `YOUTUBE_ALLOWED_CHANNEL_ID` is also accepted for existing
+  `.env` files; the plural name is preferred when configuring multiple channels.
 * `CORS_ORIGINS` is a comma-separated list; `*` is safe because the API uses
   Bearer tokens only (no cookies, `allow_credentials=False`).
 
@@ -102,10 +120,11 @@ Notes:
 .\.venv\Scripts\alembic.exe upgrade head
 ```
 
-Applies two revisions:
+Applies three revisions:
 
 1. `e9c1e8a6176c` – baseline: 8 tables, enums, indexes
 2. `d66802f3171b` – seeds `role_master` with `user`, `dj`, `admin` (idempotent)
+3. `71c2a6f9b43d` – source-aware audio assets and request track metadata
 
 ```powershell
 .\.venv\Scripts\alembic.exe current      # should print: d66802f3171b (head)
@@ -131,7 +150,7 @@ Interactive API docs: <http://127.0.0.1:8085/docs>
 ```
 
 Starts its own server on `127.0.0.1:8085`, runs **29 checks** (auth, refresh,
-role guards, live Audius search, request lifecycle with background mixing,
+role guards, YouTube search, authorized-channel request lifecycle with background mixing,
 token-protected audio streaming, path-traversal defence, WebSocket auth) and
 shuts the server down again.
 
@@ -188,9 +207,12 @@ flutter build windows --release --dart-define=API_BASE=http://192.168.1.10:8085
 | POST | `/auth/login` | `identifier` (email or phone), `password`, `role` |
 | POST | `/auth/refresh` | body field is **`refresh_token`** |
 | GET  | `/user/profile` | Bearer required |
-| GET  | `/requests/searchSong?q=` | Audius search, writes search history |
+| GET  | `/requests/searchSong?q=` | YouTube Data API search, writes search history |
 | GET  | `/requests/suggestedSongs` | suggestions from past searches |
-| POST | `/requests/requestSong` | `trackIds` (1–2), `tipAmount?`, `mixer?` → mixes in background |
+| POST | `/requests/requestSong` | `tracks: [{trackId, sourceType}]` (1–2), `tipAmount?`, `mixer?`; only authorized YouTube or server-managed assets can mix |
+| GET | `/tracks/assets?q=` | Authenticated catalog search for local/licensed/public-domain audio |
+| POST | `/tracks/assets` | Authenticated multipart upload with title, source type, license, attribution, and rights confirmation |
+| GET | `/tracks/assets/{id}/audio?token=` | Authenticated audio playback for a server-managed asset |
 | GET  | `/requests/allSongs?mineOnly=&status=` | queue; `status` honoured for DJ/admin |
 | PUT  | `/requests/accept/{id}` / `reject/{id}` / `updateStatus/{id}` | DJ/admin only |
 | GET  | `/requests/audio/{filename}` | Bearer **or** `?token=` for media players |
@@ -198,6 +220,14 @@ flutter build windows --release --dart-define=API_BASE=http://192.168.1.10:8085
 
 All responses use the envelope `{statusCode, status, data}`; use `statusCode`
 for logic and `status` for the human-readable message.
+
+YouTube results use the shared Track fields `trackId`, `sourceType`, `title`,
+`artist`, `artwork`, `duration`, `playbackUrl`, `mixEligible`, `license`, and
+`attribution`. The Flutter search view provides a **Play on YouTube** action;
+playback-only tracks are not selectable for mixing. Local/library uploads can
+be searched and selected in Flutter. The first implementation intentionally
+does not include an in-app native file picker; upload through the authenticated
+API/Swagger interface.
 
 ---
 

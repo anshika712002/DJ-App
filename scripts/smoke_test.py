@@ -6,10 +6,14 @@ database, then shuts the server down. Run from the repo root:
     .venv\\Scripts\\python.exe scripts\\smoke_test.py
 """
 import os
+import io
+import math
+import struct
 import subprocess
 import sys
 import time
 import uuid
+import wave
 
 import httpx
 
@@ -28,6 +32,21 @@ def check(name, condition, detail=""):
 def skip(name, detail=""):
     SKIP.append(name)
     print(f"  [SKIP] {name}{(' - ' + str(detail)) if detail else ''}")
+
+
+def sample_wav():
+    output = io.BytesIO()
+    sample_rate = 16000
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        frames = (
+            struct.pack("<h", int(6000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+            for i in range(sample_rate)
+        )
+        audio.writeframes(b"".join(frames))
+    return output.getvalue()
 
 
 def wait_for_server(client, timeout=60):
@@ -127,35 +146,83 @@ def main():
             r = client.get("/auth/protected", headers={"Authorization": "Bearer bogus.token.here"})
             check("invalid token rejected", r.status_code == 401, r.status_code)
 
-            print("\n-- search / suggestions (live Audius API) --")
+            print("\n-- search / suggestions (YouTube Data API) --")
             r = client.get("/requests/searchSong", params={"q": "love"},
                            headers={"Authorization": f"Bearer {ui_token}"})
             search_ok = r.status_code == 200
             tracks = r.json().get("results", []) if search_ok else []
             check("GET /requests/searchSong", search_ok and len(tracks) > 0,
                   f"{r.status_code}, {len(tracks)} tracks")
+            contract_ok = all(
+                track.get("sourceType") == "youtube"
+                and track.get("playbackUrl", "").startswith(
+                    "https://www.youtube.com/watch?v="
+                )
+                and not any("download" in key.lower() for key in track)
+                for track in tracks
+            )
+            check("YouTube results are playback-only tracks", contract_ok)
 
             r = client.get("/requests/suggestedSongs", headers={"Authorization": f"Bearer {ui_token}"})
             check("GET /requests/suggestedSongs", r.status_code == 200, r.status_code)
 
             print("\n-- song request lifecycle --")
             request_id = None
-            # Some Audius tracks are not streamable (403); try pairs until one works.
-            pair_attempts = [
-                [tracks[i]["videoId"], tracks[i + 1]["videoId"]]
-                for i in range(min(len(tracks) - 1, 5))
+            authorized_tracks = [
+                track for track in tracks if track.get("mixEligible")
             ]
+            playback_only = [track for track in tracks if not track.get("mixEligible")]
+            if playback_only:
+                r = client.post(
+                    "/requests/requestSong",
+                    headers={"Authorization": "Bearer " + dj_token},
+                    json={
+                        "tracks": [{
+                            "trackId": playback_only[0]["trackId"],
+                            "sourceType": "youtube",
+                        }],
+                        "mixer": "without-mixing",
+                    },
+                    timeout=30,
+                )
+                check(
+                    "playback-only YouTube track rejected from mixing",
+                    r.status_code == 403 and "playback-only" in r.text,
+                    f"{r.status_code} {r.text[:150]}",
+                )
+            else:
+                skip("playback-only YouTube rejection", "no non-authorized result")
+            pair_attempts = [authorized_tracks[:2]] if authorized_tracks else []
             request_error = ""
-            for ids in pair_attempts:
+            for selected_tracks in pair_attempts:
                 r = client.post("/requests/requestSong", headers={"Authorization": f"Bearer {ui_token}"},
-                                json={"trackIds": ids, "tipAmount": 5.0, "mixer": "without-mixing"},
+                                json={
+                                    "tracks": [
+                                        {
+                                            "trackId": track["trackId"],
+                                            "sourceType": "youtube",
+                                        }
+                                        for track in selected_tracks
+                                    ],
+                                    "tipAmount": 5.0,
+                                    "mixer": "without-mixing",
+                                },
                                 timeout=120)
                 if r.status_code == 200:
                     request_id = r.json().get("requestId")
                     break
                 request_error = f"{r.status_code} {r.text[:150]}"
-            check("POST /requests/requestSong", bool(request_id),
-                  request_error or f"requestId={request_id}")
+            if not authorized_tracks:
+                skip(
+                    "POST /requests/requestSong",
+                    "no configured authorized channel matched search",
+                )
+            else:
+                check(
+                    "POST /requests/requestSong",
+                    bool(request_id),
+                    request_error or f"requestId={request_id}",
+                )
 
             # wait for the background mix to finish
             mixed_url = None

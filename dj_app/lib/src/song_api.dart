@@ -24,12 +24,26 @@ class SongApi {
         .toList();
   }
 
+  Future<List<Song>> searchAssets(String query) async {
+    final raw = await _api.get('/tracks/assets', query: {'q': query});
+    return (raw as List<dynamic>? ?? [])
+        .map((e) => Song.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<int> requestMix({
-    required List<String> trackIds,
+    required List<Song> tracks,
     double? tipAmount,
     String? mixer,
   }) async {
-    final body = <String, dynamic>{'trackIds': trackIds};
+    final body = <String, dynamic>{
+      'tracks': tracks
+          .map((track) => {
+                'trackId': track.trackId,
+                'sourceType': track.sourceType,
+              })
+          .toList(),
+    };
     if (tipAmount != null) body['tipAmount'] = tipAmount;
     if (mixer != null) body['mixer'] = mixer;
     final raw = await _api.post('/requests/requestSong', body: body);
@@ -67,6 +81,18 @@ class SongApi {
     final uri = path.startsWith('http')
         ? Uri.parse(path)
         : Uri.parse(AppConfig.httpUrl(path));
+    return uri.replace(queryParameters: {...uri.queryParameters, 'token': token}).toString();
+  }
+
+  String? playbackUrl(Song track) {
+    final path = track.playbackUrl;
+    if (path == null || path.isEmpty) return null;
+    final uri = path.startsWith('http')
+        ? Uri.parse(path)
+        : Uri.parse(AppConfig.httpUrl(path));
+    if (track.sourceType == 'youtube') return uri.toString();
+    final token = _api.accessToken;
+    if (token == null || token.isEmpty) return null;
     return uri.replace(queryParameters: {...uri.queryParameters, 'token': token}).toString();
   }
 

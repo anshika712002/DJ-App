@@ -26,26 +26,49 @@ void main() {
   });
 
   group('Song.fromJson', () {
-    test('accepts Audius-style and fallback id keys', () {
-      expect(Song.fromJson({'videoId': 'abc'}).videoId, 'abc');
-      expect(Song.fromJson({'trackId': 'def'}).videoId, 'def');
-      expect(Song.fromJson({'id': 'ghi'}).videoId, 'ghi');
+    test('accepts legacy and fallback ID keys', () {
+      expect(Song.fromJson({'videoId': 'abc'}).trackId, 'abc');
+      expect(Song.fromJson({'trackId': 'def'}).trackId, 'def');
+      expect(Song.fromJson({'id': 'ghi'}).trackId, 'ghi');
     });
 
-    test('maps search result fields', () {
+    test('maps the shared source-aware track contract', () {
       final song = Song.fromJson({
-        'videoId': 'abc',
+        'trackId': 'abc',
+        'sourceType': 'youtube',
         'title': 'Nightcall',
-        'artistName': 'Kavinsky',
-        'thumbnail': 'https://example.com/art.jpg',
+        'artist': 'Kavinsky',
+        'artwork': 'https://example.com/art.jpg',
         'duration': 258,
-        'genre': 'synthwave',
+        'playbackUrl': 'https://www.youtube.com/watch?v=abc',
+        'mixEligible': false,
+        'license': 'YouTube',
+        'attribution': 'Kavinsky',
       });
       expect(song.title, 'Nightcall');
-      expect(song.artistName, 'Kavinsky');
+      expect(song.artist, 'Kavinsky');
+      expect(song.sourceType, 'youtube');
+      expect(song.artwork, 'https://example.com/art.jpg');
       expect(song.duration, 258);
-      expect(song.genre, 'synthwave');
-      expect(song.downloadAble, isTrue);
+      expect(song.playbackUrl, 'https://www.youtube.com/watch?v=abc');
+      expect(song.mixEligible, isFalse);
+      expect(song.license, 'YouTube');
+      expect(song.attribution, 'Kavinsky');
+    });
+
+    test('maps a mixable local asset', () {
+      final song = Song.fromJson({
+        'trackId': 'asset:9',
+        'sourceType': 'licensed',
+        'title': 'Licensed loop',
+        'mixEligible': true,
+        'license': 'CC BY 4.0',
+        'attribution': 'Artist',
+      });
+      expect(song.trackId, 'asset:9');
+      expect(song.sourceType, 'licensed');
+      expect(song.mixEligible, isTrue);
+      expect(song.license, 'CC BY 4.0');
     });
   });
 
@@ -62,8 +85,8 @@ void main() {
         'requestedAt': '2026-10-08T10:00:00Z',
         'playedAt': null,
         'requestedSongs': [
-          {'videoId': 'a', 'title': 'Nightcall'},
-          {'videoId': 'b', 'title': 'Sunrise'},
+          {'trackId': 'a', 'sourceType': 'youtube', 'title': 'Nightcall'},
+          {'trackId': 'b', 'sourceType': 'youtube', 'title': 'Sunrise'},
         ],
         'restaurantName': 'Cafe Wave',
       });
@@ -76,7 +99,7 @@ void main() {
       expect(item.requestedBy, 'anshika');
       expect(item.restaurantName, 'Cafe Wave');
       expect(item.songs, hasLength(2));
-      expect(item.songs.first.videoId, 'a');
+      expect(item.songs.first.trackId, 'a');
       expect(item.playedAt, isNull);
     });
 

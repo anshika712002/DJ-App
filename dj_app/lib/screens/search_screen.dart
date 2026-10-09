@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../src/audio_player.dart';
 import '../src/models.dart';
 import '../src/song_api.dart';
 import '../widgets.dart';
@@ -47,9 +48,9 @@ class _SearchScreenState extends State<SearchScreen>
       _query = null;
     });
     try {
-      final results = await _api.suggested();
+      final results = await Future.wait([_api.suggested(), _api.searchAssets('')]);
       if (!mounted) return;
-      setState(() => _songs = results);
+      setState(() => _songs = [...results[0], ...results[1]]);
     } catch (e) {
       if (!mounted) return;
       showApiError(context, e);
@@ -67,10 +68,11 @@ class _SearchScreenState extends State<SearchScreen>
       _query = query;
     });
     try {
-      final results = await _api.search(query);
+      final results = await Future.wait([_api.search(query), _api.searchAssets(query)]);
       if (!mounted) return;
-      setState(() => _songs = results);
-      if (results.isEmpty) showInfo(context, 'No tracks found for "$query"');
+      final combined = [...results[0], ...results[1]];
+      setState(() => _songs = combined);
+      if (combined.isEmpty) showInfo(context, 'No tracks found for "$query"');
     } catch (e) {
       if (!mounted) return;
       showApiError(context, e);
@@ -95,7 +97,7 @@ class _SearchScreenState extends State<SearchScreen>
     setState(() => _busy = true);
     try {
       final id = await _api.requestMix(
-        trackIds: _selected.map((s) => s.videoId).toList(),
+        tracks: _selected,
         tipAmount: tip,
         mixer: _mixer,
       );
@@ -110,6 +112,23 @@ class _SearchScreenState extends State<SearchScreen>
       showApiError(context, e);
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _playTrack(Song song) async {
+    final url = _api.playbackUrl(song);
+    if (url == null) {
+      showInfo(context, 'This track is not available for playback.');
+      return;
+    }
+    try {
+      if (song.sourceType == 'youtube') {
+        await openExternalUrl(url);
+      } else {
+        await playUrl(url);
+      }
+    } catch (e) {
+      if (mounted) showApiError(context, e);
     }
   }
 
@@ -171,12 +190,13 @@ class _SearchScreenState extends State<SearchScreen>
                           final song = _songs[i];
                           final checked = _selected.contains(song);
                           final selectable =
-                              checked || _selected.length < 2;
+                              checked || (song.mixEligible && _selected.length < 2);
                           return _SongTile(
                             song: song,
                             checked: checked,
                             selectable: selectable,
                             onTap: () => _toggle(song),
+                            onPlay: () => _playTrack(song),
                           );
                         },
                       ),
@@ -204,7 +224,7 @@ class _SearchScreenState extends State<SearchScreen>
               children: [
                 Expanded(
                   child: Text(
-                    _selected.map((s) => s.title ?? s.videoId).join('  +  '),
+                    _selected.map((s) => s.title ?? s.trackId).join('  +  '),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.titleSmall,
@@ -280,12 +300,14 @@ class _SongTile extends StatelessWidget {
     required this.checked,
     required this.selectable,
     required this.onTap,
+    required this.onPlay,
   });
 
   final Song song;
   final bool checked;
   final bool selectable;
   final VoidCallback onTap;
+  final VoidCallback onPlay;
 
   @override
   Widget build(BuildContext context) {
@@ -295,9 +317,9 @@ class _SongTile extends StatelessWidget {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
-            child: song.thumbnail != null && song.thumbnail!.isNotEmpty
+            child: song.artwork != null && song.artwork!.isNotEmpty
                 ? Image.network(
-                    song.thumbnail!,
+                    song.artwork!,
                     width: 52,
                     height: 52,
                     fit: BoxFit.cover,
@@ -318,16 +340,29 @@ class _SongTile extends StatelessWidget {
           maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
         [
-          if (song.artistName != null && song.artistName!.isNotEmpty)
-            song.artistName!,
+          if (song.artist != null && song.artist!.isNotEmpty) song.artist!,
           if (song.duration != null) _formatDuration(song.duration!),
+          if (song.sourceType == 'youtube' && !song.mixEligible)
+            'YouTube playback only - cannot be mixed',
+          if (song.sourceType != 'youtube' && song.license != null)
+            'License: ${song.license}',
         ].join('  •  '),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
-      trailing: Checkbox(
-        value: checked,
-        onChanged: selectable ? (_) => onTap() : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: song.sourceType == 'youtube' ? 'Play on YouTube' : 'Play track',
+            onPressed: onPlay,
+            icon: Icon(song.sourceType == 'youtube' ? Icons.open_in_new : Icons.play_arrow),
+          ),
+          Checkbox(
+            value: checked,
+            onChanged: selectable ? (_) => onTap() : null,
+          ),
+        ],
       ),
       onTap: selectable ? onTap : null,
     );

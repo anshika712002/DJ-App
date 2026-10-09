@@ -14,6 +14,10 @@ Future<void> playUrl(String url) async {
   await element.play().toDart;
 }
 
+Future<void> openExternalUrl(String url) async {
+  web.window.open(url, '_blank');
+}
+
 void stopAudio() {
   final element = _element;
   if (element == null) return;
