@@ -2,30 +2,25 @@ import os
 import math
 import time
 import ffmpeg
-import httpx
 import shutil
 from pydub import AudioSegment
 from gtts import gTTS
 from datetime import datetime
 from pydub.effects import normalize
-import asyncio
 
 # -----------------------------
 # CONSTANTS
 # -----------------------------
-AUDIUS_API_BASE = "https://discoveryprovider.audius.co/v1"
-APP_NAME = "djapp"
-
 # FINAL USER-REQUESTED FOLDER PATHS
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Downloaded Audius source tracks (project-relative, machine independent)
-AUDIUS_DOWNLOADS_FOLDER = os.path.join(BASE_DIR, "audius_downloads")
+# Downloaded YouTube source tracks (only from configured authorized channels)
+YOUTUBE_DOWNLOADS_FOLDER = os.path.join(BASE_DIR, "youtube_downloads")
 
 # Mixed audio output, also exposed as static /audio
 MIXED_AUDIO_FOLDER = os.path.join(BASE_DIR, "uploads", "mixed_audio")
 
-os.makedirs(AUDIUS_DOWNLOADS_FOLDER, exist_ok=True)
+os.makedirs(YOUTUBE_DOWNLOADS_FOLDER, exist_ok=True)
 os.makedirs(MIXED_AUDIO_FOLDER, exist_ok=True)
 
 os.environ["PYDUB_FFMPEG_LOGLEVEL"] = "quiet"
@@ -81,6 +76,16 @@ def mix_audio(audio1_path, audio2_path, output_path):
     return output_path
 
 
+def copy_audio_as_mp3(audio_path, output_path):
+    if os.path.splitext(audio_path)[1].lower() == ".mp3":
+        shutil.copy(audio_path, output_path)
+    else:
+        AudioSegment.from_file(audio_path).export(
+            output_path, format="mp3", bitrate="192k"
+        )
+    return output_path
+
+
 def mashup_tracks(a_path: str, b_path: str, out_path: str, seg_ms: int = SEG_MS):
     a = AudioSegment.from_file(a_path)
     b = AudioSegment.from_file(b_path)
@@ -119,123 +124,3 @@ def overlay_tracks(main_path: str, bg_path: str, out_path: str, bg_db: int = BG_
 
 def overlay_beat(main_path: str, beat_path: str, out_path: str, bg_db: int = BG_ATTENUATE_DB):
     return overlay_tracks(main_path, beat_path, out_path, bg_db)
-
-
-# ------------------------------------------------------------
-# 🔍 Audius Search
-# ------------------------------------------------------------
-async def search_audius_tracks(query: str, limit: int = 5):
-    url = f"{AUDIUS_API_BASE}/tracks/search"
-    params = {"query": query, "limit": limit}
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json().get("data", [])
-
-        return [
-            {
-                "trackId": t["id"],
-                "title": t["title"],
-                "artist": t["user"]["name"],
-                "artwork": t.get("artwork", {}).get("150x150", ""),
-                "stream_url": f"{AUDIUS_API_BASE}/tracks/{t['id']}/stream"
-            }
-            for t in data
-        ]
-    except Exception as e:
-        print(f"❌ Audius search failed: {e}")
-        return []
-
-# ------------------------------------------------------------
-#  🔍 Get Audius Track Details (title, artist, artwork)
-# ------------------------------------------------------------
-async def get_audius_track_details(track_id: str):
-    url = f"{AUDIUS_API_BASE}/tracks/{track_id}"
-    params = {"app_name": APP_NAME}
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
-
-            data = r.json().get("data", {})
-            if not data:
-                return {
-                    "trackId": track_id,
-                    "title": None,
-                    "artistName": None,
-                    "thumbnail": None,
-                }
-
-            return {
-                "trackId": data["id"],
-                "title": data.get("title"),
-                "artistName": data["user"].get("name"),
-                "thumbnail": data.get("artwork", {}).get("150x150"),
-            }
-
-    except Exception as e:
-        print(f"❌ Failed to fetch track details for {track_id}: {e}")
-        return {
-            "trackId": track_id,
-            "title": None,
-            "artistName": None,
-            "thumbnail": None,
-        }
-
-# ------------------------------------------------------------
-#  ⬇️ FIXED AUDIO DOWNLOAD FUNCTION
-#  - Now accepts folder from song_requests.py
-#  - Saves to correct absolute path
-#  - Retries, handles redirects
-# ------------------------------------------------------------
-async def download_audius_audio(track_id: str, download_folder: str = AUDIUS_DOWNLOADS_FOLDER) -> str:
-    """
-    Downloads an Audius track using the official streaming endpoint.
-    Handles redirects and failures. Saves to user-defined folder.
-    """
-
-    output_path = os.path.join(download_folder, f"{track_id}.mp3")
-
-    # Reuse previously downloaded file
-    if os.path.exists(output_path):
-        return output_path
-
-    stream_url = f"{AUDIUS_API_BASE}/tracks/{track_id}/stream"
-    params = {"app_name": APP_NAME}
-
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-        for attempt in range(3):
-            try:
-                # 1) Get redirect URL
-                r = await client.get(stream_url, params=params)
-
-                if r.status_code not in (200, 302):
-                    print(f"⚠️ Attempt {attempt+1}: invalid redirect response {r.status_code}")
-                    await asyncio.sleep(1)
-                    continue
-
-                final_url = str(r.url)
-
-                # 2) Fetch actual MP3 file
-                mp3 = await client.get(final_url)
-
-                if mp3.status_code != 200:
-                    print(f"⚠️ Attempt {attempt+1}: MP3 fetch failed {mp3.status_code}")
-                    await asyncio.sleep(1)
-                    continue
-
-                # 3) Save file
-                with open(output_path, "wb") as f:
-                    f.write(mp3.content)
-
-                print(f"✅ Downloaded Audius track: {track_id}")
-                return output_path
-
-            except Exception as e:
-                print(f"⚠️ Attempt {attempt+1} error: {e}")
-                await asyncio.sleep(1)
-
-    raise Exception(f"❌ Failed to download Audius track: {track_id}")

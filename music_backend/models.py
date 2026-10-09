@@ -109,6 +109,25 @@ class DownloadedAudio(Base):
     filePath = Column(String(255), nullable=True)
     createdAt = Column(DateTime, default=func.now())
 
+
+class AudioAsset(Base):
+    __tablename__ = "audio_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ownerId = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    sourceType = Column(String(32), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    artist = Column(String(255), nullable=True)
+    artwork = Column(String(2048), nullable=True)
+    duration = Column(Integer, nullable=False)
+    filePath = Column(String(512), nullable=False, unique=True)
+    license = Column(String(255), nullable=False)
+    attribution = Column(Text, nullable=True)
+    createdAt = Column(DateTime, default=func.now(), nullable=False)
+
+    owner = relationship("User")
+
+
 class SongRequest(Base):
     __tablename__ = "song_requests"
 
@@ -128,6 +147,7 @@ class SongRequest(Base):
     mixedAudioPath = Column(String, nullable=True)
     mixedAudioData = Column(LargeBinary, nullable=True)
     videoIds = Column(String, nullable=True)
+    trackMetadata = Column(JSONB, nullable=True)
     mixer = Column(String, nullable=True, default="overlay")
     createdAt = Column(DateTime, default=utcnow, index=True)
     playedAt = Column(DateTime(timezone=True), nullable=True)

@@ -1,4 +1,5 @@
-import logging, os, asyncio, re, emoji, time, shutil
+import logging, os, asyncio, re, emoji, time
+from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi import (
     APIRouter,
@@ -9,6 +10,7 @@ from fastapi import (
     Query,
     BackgroundTasks
 )
+from audio_assets import ASSET_DIR
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import (
     select,
@@ -19,40 +21,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from models import (
+    AudioAsset,
     SongRequest,
     RequestStatus,
     User,
     UserSearchHistory,
     RoleMaster,
-    CachedSong
 )
 from database import get_db, AsyncSessionLocal
 from auth_utils import decode_access_token
 from typing import Optional, List
 from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
-import httpx
-import json
-
 from process_audio import (
     mashup_tracks,
     overlay_tracks,
-    download_audius_audio,
     crossfade_tracks,
     change_pitch,
     change_tempo,
     mix_audio,
     overlay_beat,
-    search_audius_tracks,
-    get_audius_track_details,
-    AUDIUS_DOWNLOADS_FOLDER,
-    MIXED_AUDIO_FOLDER
+    YOUTUBE_DOWNLOADS_FOLDER,
+    MIXED_AUDIO_FOLDER,
+    copy_audio_as_mp3,
+)
+from youtube_api import (
+    YOUTUBE_VIDEO_ID,
+    authorized_channel_ids,
+    download_authorized_youtube_audio,
+    get_youtube_video_details,
+    search_youtube_videos,
+    song_from_youtube_video,
 )
 
 from websocket_manager import broadcast_song_request, broadcast_message
 
 from schemas import (
-    SongInfo,
+    SongMixRequest,
+    Track,
     SongRequestResponse,
     AllSongResponseWrapper,
     SongRequestSimplifiedResponse,
@@ -64,7 +70,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ORIGINAL_AUDIO_FOLDER = AUDIUS_DOWNLOADS_FOLDER
+ORIGINAL_AUDIO_FOLDER = YOUTUBE_DOWNLOADS_FOLDER
 
 PUBLIC_API_BASE = os.getenv("PUBLIC_API_BASE", "")
 
@@ -83,9 +89,6 @@ VALID_MIXERS = {
     "beat-overlay",
     "without-mixing"
 }
-
-AUDIUS_API_BASE = "https://discoveryprovider.audius.co/v1"
-
 
 async def _notify_clients(message: dict):
     """Best-effort realtime push; never let a dead socket break an API call."""
@@ -139,7 +142,7 @@ def mix_tracks(mixing_mode, valid_tracks, final_path):
         overlay_beat(valid_tracks[0], valid_tracks[1], final_path)
 
     elif mixing_mode == "without-mixing":
-        shutil.copy(valid_tracks[0], final_path)
+        copy_audio_as_mp3(valid_tracks[0], final_path)
 
     else:
         raise ValueError("Invalid mixing mode")
@@ -147,12 +150,55 @@ def mix_tracks(mixing_mode, valid_tracks, final_path):
     logger.info(f"Mix '{mixing_mode}' completed in {time.time() - start_time:.2f}s")
 
 
+def require_authorized_youtube_tracks(
+    youtube_ids: list[str],
+    videos: dict[str, dict],
+    allowed_channels: set[str],
+) -> None:
+    rejected_channels = {
+        track_id: videos[track_id].get("snippet", {}).get("channelId")
+        for track_id in youtube_ids
+        if videos[track_id].get("snippet", {}).get("channelId")
+        not in allowed_channels
+    }
+    if rejected_channels:
+        logger.warning(
+            "Rejecting YouTube mix request: video channel IDs are not authorized "
+            "(video_channels=%s, allowed_channel_ids=%s).",
+            rejected_channels,
+            sorted(allowed_channels),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This YouTube video is playback-only and cannot be mixed because "
+                "its channel ID is not "
+                "listed in YOUTUBE_ALLOWED_CHANNEL_IDS. The YouTube API key enables "
+                "search and metadata access; it does not authorize audio processing. "
+                "Choose an authorized video or a local/licensed audio asset."
+            ),
+        )
+
+
+def resolve_audio_asset_path(
+    asset: AudioAsset, source_type: str, requester_id: int
+) -> str:
+    if asset.sourceType != source_type:
+        raise HTTPException(status_code=400, detail="Audio asset source type mismatch.")
+    if asset.sourceType == "local" and asset.ownerId != requester_id:
+        raise HTTPException(
+            status_code=403, detail="This local audio asset belongs to another user."
+        )
+    path = Path(asset.filePath).resolve()
+    if path.parent != ASSET_DIR or not path.is_file():
+        raise HTTPException(status_code=404, detail="Audio asset file is unavailable.")
+    return str(path)
+
+
 @song_request_router.post("/requestSong")
 async def download_and_mix(
     background_tasks: BackgroundTasks,
-    trackIds: List[str] = Body(..., embed=True),
-    tipAmount: Optional[float] = Body(None),
-    mixer: Optional[str] = Body(None),
+    request_data: SongMixRequest,
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db)
 ):
@@ -165,42 +211,114 @@ async def download_and_mix(
     if not user:
         raise HTTPException(404, "User not found")
 
-    download_results = await asyncio.gather(
-        *[download_audius_audio(t, ORIGINAL_AUDIO_FOLDER) for t in trackIds],
-        return_exceptions=True,
-    )
-    failed_tracks = [
-        tid for tid, res in zip(trackIds, download_results)
-        if isinstance(res, BaseException)
-    ]
-    if failed_tracks:
-        logger.warning("Audius download failed for tracks: %s", failed_tracks)
+    tracks = request_data.tracks
+    if not 1 <= len(tracks) <= 2 or len({(t.sourceType, t.trackId) for t in tracks}) != len(tracks):
         raise HTTPException(
-            400,
-            "These tracks are not available for streaming/download: "
-            + ", ".join(failed_tracks),
+            status_code=400, detail="Select one or two different tracks."
         )
+    youtube_tracks = [track for track in tracks if track.sourceType == "youtube"]
+    assets_by_id = {}
+    asset_refs = [track for track in tracks if track.sourceType != "youtube"]
+    if any(not track.trackId.startswith("asset:") for track in asset_refs):
+        raise HTTPException(status_code=400, detail="Invalid audio asset reference.")
+    try:
+        asset_ids = [int(track.trackId.split(":", 1)[1]) for track in asset_refs]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid audio asset reference.") from exc
+    if asset_ids:
+        result = await db.execute(select(AudioAsset).where(AudioAsset.id.in_(asset_ids)))
+        assets_by_id = {asset.id: asset for asset in result.scalars().all()}
+        if len(assets_by_id) != len(set(asset_ids)):
+            raise HTTPException(status_code=404, detail="One or more audio assets were not found.")
 
-    selected_mixer = mixer if mixer in VALID_MIXERS else "overlay"
+    allowed_channels = authorized_channel_ids()
+    youtube_ids = [track.trackId for track in youtube_tracks]
+    if any(not YOUTUBE_VIDEO_ID.fullmatch(track_id) for track_id in youtube_ids):
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    videos = await get_youtube_video_details(youtube_ids)
+    if any(track_id not in videos for track_id in youtube_ids):
+        raise HTTPException(status_code=404, detail="One or more YouTube videos are unavailable.")
+    require_authorized_youtube_tracks(youtube_ids, videos, allowed_channels)
 
-    song_infos = await asyncio.gather(
-        *[get_audius_track_details(t) for t in trackIds]
-    )
+    song_infos = []
+    audio_paths = []
+    youtube_song_infos = {
+        track_id: song_from_youtube_video(track_id, videos[track_id], allowed_channels)
+        for track_id in youtube_ids
+    }
+    for track in tracks:
+        if track.sourceType == "youtube":
+            song = youtube_song_infos[track.trackId]
+            song_infos.append(song)
+            audio_paths.append(os.path.join(ORIGINAL_AUDIO_FOLDER, track.trackId + ".mp3"))
+        else:
+            asset_id = int(track.trackId.split(":", 1)[1])
+            asset = assets_by_id[asset_id]
+            path = resolve_audio_asset_path(asset, track.sourceType, user.id)
+            song = {
+                "trackId": track.trackId,
+                "sourceType": asset.sourceType,
+                "title": asset.title,
+                "artist": asset.artist,
+                "artwork": asset.artwork,
+                "duration": asset.duration,
+                "playbackUrl": f"/tracks/assets/{asset.id}/audio",
+                "mixEligible": True,
+                "license": asset.license,
+                "attribution": asset.attribution,
+            }
+            song_infos.append(song)
+            audio_paths.append(path)
+
+    if youtube_ids:
+        download_results = await asyncio.gather(
+            *[
+                run_in_threadpool(
+                    download_authorized_youtube_audio,
+                    track_id,
+                    ORIGINAL_AUDIO_FOLDER,
+                )
+                for track_id in youtube_ids
+            ],
+            return_exceptions=True,
+        )
+        failed_tracks = [
+            tid for tid, res in zip(youtube_ids, download_results)
+            if isinstance(res, BaseException)
+        ]
+        if failed_tracks:
+            logger.error("Authorized YouTube audio download failed for video IDs: %s", failed_tracks)
+            raise HTTPException(
+                status_code=502,
+                detail="Could not process audio for authorized YouTube content. Confirm availability and FFmpeg installation.",
+            )
+
+    selected_mixer = request_data.mixer if request_data.mixer in VALID_MIXERS else "overlay"
+    if len(tracks) == 1:
+        selected_mixer = "without-mixing"
+    track_metadata = [
+        {
+            key: song.get(key)
+            for key in ("trackId", "sourceType", "title", "artist", "artwork", "duration", "license", "attribution")
+        }
+        for song in song_infos
+    ]
 
     new_req = SongRequest(
         requesterId=user.id,
         status=RequestStatus.PENDING,
-        videoIds=",".join(trackIds),
+        videoIds=",".join(track.trackId for track in tracks),
+        trackMetadata=track_metadata,
         songName=song_infos[0]["title"] if len(song_infos) > 0 else None,
         songName2=song_infos[1]["title"] if len(song_infos) > 1 else None,
-        tipAmount=tipAmount,
+        tipAmount=request_data.tipAmount,
         mixer=selected_mixer,
         videoTitle1=song_infos[0]["title"] if len(song_infos) > 0 else None,
-        videoThumbnail1=song_infos[0]["thumbnail"] if len(song_infos) > 0 else None,
-        videoArtist1=song_infos[0]["artistName"] if len(song_infos) > 0 else None,
+        videoThumbnail1=song_infos[0]["artwork"] if len(song_infos) > 0 else None,
+        videoArtist1=song_infos[0]["artist"] if len(song_infos) > 0 else None,
         videoTitle2=song_infos[1]["title"] if len(song_infos) > 1 else None,
-        videoThumbnail2=song_infos[1]["thumbnail"] if len(song_infos) > 1 else None,
-        videoArtist2=song_infos[1]["artistName"] if len(song_infos) > 1 else None,
+        videoThumbnail2=song_infos[1]["artwork"] if len(song_infos) > 1 else None,
+        videoArtist2=song_infos[1]["artist"] if len(song_infos) > 1 else None,
     )
 
     db.add(new_req)
@@ -212,24 +330,21 @@ async def download_and_mix(
     except Exception as e:
         logger.warning("WebSocket broadcast failed: %s", e)
 
-    final_filename = f"{'_'.join(trackIds)}_{selected_mixer}.mp3"
+    final_filename = f"request_{new_req.id}_{selected_mixer}.mp3"
     final_path = os.path.join(MIXED_AUDIO_FOLDER, final_filename)
 
-    asyncio.create_task(_process_mixing_async(new_req.id, selected_mixer, trackIds, final_path))
+    asyncio.create_task(_process_mixing_async(new_req.id, selected_mixer, audio_paths, final_path))
 
     return {
         "requestId": new_req.id,
         "message": f"Mix started with '{selected_mixer}' mode.",
-        "downloadedTracks": song_infos
+        "tracks": song_infos
 
     }
     
-async def _process_mixing_async(request_id, mixer, video_ids, final_path):
+async def _process_mixing_async(request_id, mixer, audio_paths, final_path):
     try:
-        valid_tracks = [
-            os.path.join(ORIGINAL_AUDIO_FOLDER, vid + ".mp3")
-            for vid in video_ids
-        ]
+        valid_tracks = audio_paths
         start_time = time.time() 
         await run_in_threadpool(mix_tracks, mixer, valid_tracks, final_path)
 
@@ -302,77 +417,14 @@ async def search_song(
     if not user_data:
         raise HTTPException(401, "Invalid token")
 
+    results = await search_youtube_videos(q, limit=10)
     await db.execute(
         insert(UserSearchHistory).values(
-            userId=user_data["userId"], 
-            queryText=q
+            userId=user_data["userId"],
+            queryText=q,
         )
     )
     await db.commit()
-
-    url = f"{AUDIUS_API_BASE}/tracks/search"
-    params = {"query": q, "limit": 10}
-
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url, params=params)
-        if r.status_code != 200:
-            raise HTTPException(500, "Audius search failed")
-
-    data = r.json().get("data", [])
-    results = []
-
-    for item in data:
-        track_id = item.get("id")
-        artwork = item.get("artwork") or {}
-        mapped_artwork = {
-            "small": artwork.get("150x150"),
-            "medium": artwork.get("480x480"),
-            "large": artwork.get("1000x1000"),
-            "mirrors": artwork.get("mirrors", [])
-        }
-
-        song = {
-            "videoId": track_id,
-            "title": item.get("title"),
-            "artistName": item.get("user", {}).get("name", ""),
-            "thumbnail": artwork.get("150x150", ""),
-            "artwork": mapped_artwork,
-            "duration": item.get("duration"),
-            "genre": item.get("genre"),
-            "downloadAble": item.get("downloadable", False),
-            "downloadUrl": item.get("download_url"),
-            "license": item.get("license") or "all-rights-reserved",
-            "streamUrl": f"{AUDIUS_API_BASE}/tracks/{track_id}/stream?app_name=djapp"
-        }
-
-        results.append(song)
-
-        try:
-            stmt = (
-                insert(CachedSong)
-                .values(
-                    query=q,
-                    videoId=song["videoId"],
-                    title=song["title"],
-                    thumbnail=song["thumbnail"],
-                    artistName=song["artistName"],
-                    duration=song["duration"],
-                    genre=song["genre"],
-                    downloadAble=song["downloadAble"],
-                    license=song["license"],
-                    artwork=song["artwork"]
-                )
-                .on_conflict_do_nothing(
-                    index_elements=["query", "videoId"]
-                )
-            )
-            await db.execute(stmt)
-
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to cache song {track_id} → {e}")
-
-    await db.commit()
-
     return {"results": results}
 
 def clean_and_shorten(title: str, word_limit: int = 2) -> str:
@@ -444,23 +496,39 @@ async def get_all_song_requests(
 
     for req in song_requests:
 
-        videoIds = req.videoIds.split(",") if req.videoIds else []
-
+        video_ids = req.videoIds.split(",") if req.videoIds else []
         requested_songs = []
-        if len(videoIds) > 0:
-            requested_songs.append(SongInfo(
-                videoId=videoIds[0],
-                title=req.videoTitle1,
-                thumbnail=req.videoThumbnail1,
-                artistName=req.videoArtist1
-            ))
-        if len(videoIds) > 1:
-            requested_songs.append(SongInfo(
-                videoId=videoIds[1],
-                title=req.videoTitle2,
-                thumbnail=req.videoThumbnail2,
-                artistName=req.videoArtist2
-            ))
+        if req.trackMetadata:
+            requested_songs = [
+                Track(
+                    **metadata,
+                    playbackUrl=(
+                        f"https://www.youtube.com/watch?v={metadata['trackId']}"
+                        if metadata.get("sourceType") == "youtube"
+                        else f"/tracks/assets/{metadata['trackId'].split(':', 1)[1]}/audio"
+                    ),
+                    mixEligible=metadata.get("sourceType") != "youtube",
+                )
+                for metadata in req.trackMetadata
+            ]
+        else:
+            legacy_details = [
+                (req.videoTitle1, req.videoThumbnail1, req.videoArtist1),
+                (req.videoTitle2, req.videoThumbnail2, req.videoArtist2),
+            ]
+            requested_songs = [
+                Track(
+                    trackId=video_id,
+                    sourceType="youtube",
+                    title=legacy_details[index][0],
+                    artist=legacy_details[index][2],
+                    artwork=legacy_details[index][1],
+                    playbackUrl=f"https://www.youtube.com/watch?v={video_id}",
+                    mixEligible=False,
+                    license="YouTube",
+                )
+                for index, video_id in enumerate(video_ids[:2])
+            ]
 
         mixed_audio_url = (
             f"{PUBLIC_API_BASE}/requests/audio/{req.mixedAudioPath}"
@@ -494,7 +562,7 @@ async def get_all_song_requests(
 
 @song_request_router.get("/videosInfo")
 async def get_video_info_for_multiple_ids(
-    videoIds: str = Query(..., description="Comma-separated Audius track IDs"),
+    videoIds: str = Query(..., description="Comma-separated YouTube video IDs"),
     token: str = Depends(oauth2_scheme)
 ):
     start_time = time.time()
@@ -507,40 +575,13 @@ async def get_video_info_for_multiple_ids(
     if not id_list:
         raise HTTPException(status_code=400, detail="No valid video IDs provided")
 
-    results = []
-
-    async with httpx.AsyncClient() as client:
-        for track_id in id_list:
-            url = f"https://discoveryprovider.audius.co/v1/tracks/{track_id}"
-            params = {"app_name": "djapp"}
-
-            response = await client.get(url, params=params)
-            data = response.json()
-
-            # Audius returns a dict, not a list
-            track = data.get("data", None)
-            if not track:
-                continue
-            artwork = track.get("artwork") or {}
-
-            mapped_artwork = {
-                "small": artwork.get("150x150"),
-                "medium": artwork.get("480x480"),
-                "large": artwork.get("1000x1000"),
-                "mirrors": artwork.get("mirrors", [])
-            }
-
-            results.append({
-                "videoId": track_id,
-                "title": track.get("title"),
-                "artistName": track.get("user", {}).get("name"),
-                "artwork": mapped_artwork,
-                "duration": track.get("duration"),
-                "genre": track.get("genre"),
-                "downloadAble": track.get("downloadable", False),
-                "downloadUrl": track.get("download_url"),
-                "streamUrl": track.get("stream_url"),
-            })
+    videos = await get_youtube_video_details(id_list)
+    allowed_channels = authorized_channel_ids()
+    results = [
+        song_from_youtube_video(track_id, videos[track_id], allowed_channels)
+        for track_id in id_list
+        if track_id in videos
+    ]
 
     duration = time.time() - start_time
     logger.info(f"🚀 /videosInfo completed in {duration:.2f} seconds")
@@ -568,7 +609,7 @@ async def get_suggested_songs(
 
     keyword = search_terms[-1] if search_terms else "trending music"
 
-    tracks = await search_audius_tracks(keyword, limit=10)
+    tracks = await search_youtube_videos(keyword, limit=10)
     return {"results": tracks}
 
 

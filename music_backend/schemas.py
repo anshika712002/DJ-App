@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import Literal, Optional, List
 from enum import Enum
 from datetime import datetime
 
@@ -54,11 +54,29 @@ class UserTokenData(BaseModel):
     tokenType: Optional[str] = None
 
 
-class SongInfo(BaseModel):
-    videoId: str
-    title: Optional[str]
-    thumbnail: Optional[str]
-    artistName: Optional[str]
+class Track(BaseModel):
+    trackId: str
+    sourceType: Literal["youtube", "local", "licensed", "public_domain"]
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    artwork: Optional[str] = None
+    duration: Optional[int] = None
+    playbackUrl: Optional[str] = None
+    mixEligible: bool = False
+    license: Optional[str] = None
+    attribution: Optional[str] = None
+
+
+class TrackReference(BaseModel):
+    trackId: str
+    sourceType: Literal["youtube", "local", "licensed", "public_domain"]
+
+
+class SongMixRequest(BaseModel):
+    tracks: List[TrackReference]
+    tipAmount: Optional[float] = None
+    mixer: Optional[str] = None
+
 
 class StatusEnum(str, Enum):
     pending = "pending"
@@ -88,7 +106,7 @@ class SongRequestSimplifiedResponse(BaseModel):
     requestedBy: str
     requestedAt: Optional[str]
     playedAt: Optional[str]
-    requestedSongs: List[SongInfo]
+    requestedSongs: List[Track]
     restaurantName: Optional[str]
 
 class AllSongResponseWrapper(BaseModel):

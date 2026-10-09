@@ -24,6 +24,7 @@ from auth import auth_router
 from database import  async_engine, Base
 from user import user_router
 from song_requests import song_request_router 
+from audio_assets import audio_asset_router
 from websocket_manager import connected_clients
 from sqlalchemy import text 
 from database import AsyncSessionLocal
@@ -34,6 +35,7 @@ print("✅ FastAPI server is starting...")
 REQUIRED_TABLES = (
     "users", "role_master", "restaurants", "song_requests",
     "cached_songs", "downloaded_audios", "refresh_tokens", "user_search_history",
+    "audio_assets",
 )
 
 
@@ -102,6 +104,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 app.include_router(user_router, prefix="/user", tags=["User Management"])
 app.include_router(song_request_router, prefix="/requests", tags=["Song Requests"])
+app.include_router(audio_asset_router)
 
 @app.get("/")
 def home():
