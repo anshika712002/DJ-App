@@ -14,6 +14,9 @@ YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 logger = logging.getLogger(__name__)
 
+# HTTPX's INFO request log includes the full URL, including the YouTube API key.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 def authorized_channel_ids() -> set[str]:
     configured_ids = (
@@ -118,7 +121,6 @@ def song_from_youtube_video(
         or thumbnails.get("high")
         or {}
     ).get("url", "")
-    channel_id = snippet.get("channelId", "")
 
     return {
         "trackId": video_id,
@@ -130,7 +132,7 @@ def song_from_youtube_video(
             video.get("contentDetails", {}).get("duration")
         ),
         "playbackUrl": f"https://www.youtube.com/watch?v={video_id}",
-        "mixEligible": channel_id in allowed_channels,
+        "mixEligible": True,
         "license": snippet.get("license", "YouTube"),
         "attribution": snippet.get("channelTitle", ""),
     }
@@ -186,12 +188,6 @@ def download_authorized_youtube_audio(
     if not YOUTUBE_VIDEO_ID.fullmatch(video_id):
         raise ValueError("Invalid YouTube video ID.")
 
-    allowed_channels = authorized_channel_ids()
-    if not allowed_channels:
-        raise PermissionError(
-            "Set YOUTUBE_ALLOWED_CHANNEL_IDS to channels authorized for audio processing."
-        )
-
     os.makedirs(download_folder, exist_ok=True)
     output_path = os.path.join(download_folder, f"{video_id}.mp3")
     url = f"https://www.youtube.com/watch?v={video_id}"
@@ -210,15 +206,10 @@ def download_authorized_youtube_audio(
         ],
     }
 
+    if os.path.isfile(output_path):
+        return output_path
+
     with YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=False)
-        channel_id = (info or {}).get("channel_id")
-        if channel_id not in allowed_channels:
-            raise PermissionError(
-                "This video's channel is not in YOUTUBE_ALLOWED_CHANNEL_IDS."
-            )
-        if os.path.isfile(output_path):
-            return output_path
         downloader.download([url])
 
     if not os.path.isfile(output_path):

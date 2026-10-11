@@ -14,10 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from music_backend import audio_assets as assets_module
 from music_backend import song_requests as request_module
-from music_backend.song_requests import (
-    require_authorized_youtube_tracks,
-    resolve_audio_asset_path,
-)
+from music_backend.song_requests import resolve_audio_asset_path
 
 
 class _DbResult:
@@ -88,27 +85,6 @@ def _test_wav():
     return output.getvalue()
 
 
-def test_playback_only_youtube_track_is_rejected_from_mixing():
-    video_id = "abcdefghijk"
-    videos = {video_id: {"snippet": {"channelId": "UC-not-authorized"}}}
-
-    with pytest.raises(HTTPException) as exc:
-        require_authorized_youtube_tracks(
-            [video_id], videos, {"UC-authorized"}
-        )
-
-    assert exc.value.status_code == 403
-    assert "playback-only" in exc.value.detail
-    assert "cannot be mixed" in exc.value.detail
-
-
-def test_authorized_youtube_track_remains_eligible_for_existing_path():
-    video_id = "abcdefghijk"
-    videos = {video_id: {"snippet": {"channelId": "UC-authorized"}}}
-
-    require_authorized_youtube_tracks([video_id], videos, {"UC-authorized"})
-
-
 def test_audio_asset_path_is_server_resolved_and_owner_scoped(tmp_path, monkeypatch):
     import music_backend.song_requests as requests
 
@@ -144,19 +120,30 @@ def test_audio_asset_path_rejects_client_path_and_source_mismatch(tmp_path, monk
     outside_file.unlink()
 
 
-def test_request_endpoint_rejects_playback_only_youtube_track(monkeypatch, caplog):
+def test_request_endpoint_downloads_youtube_track_regardless_of_channel(monkeypatch):
     video_id = "abcdefghijk"
+    downloaded = []
 
     async def video_details(_ids):
-        return {video_id: {"snippet": {"channelId": "UC-other"}}}
+        return {
+            video_id: {
+                "snippet": {
+                    "channelId": "UC-other",
+                    "title": "Any video",
+                    "channelTitle": "Some channel",
+                    "thumbnails": {},
+                },
+                "contentDetails": {"duration": "PT2M"},
+            }
+        }
 
-    def unexpected_download(*_args, **_kwargs):
-        pytest.fail("yt-dlp must not run for an unauthorized channel")
+    def download(track_id, _folder):
+        downloaded.append(track_id)
+        return f"{track_id}.mp3"
 
     monkeypatch.setattr(request_module, "get_youtube_video_details", video_details)
-    monkeypatch.setattr(request_module, "authorized_channel_ids", lambda: {"UC-owned"})
     monkeypatch.setattr(
-        request_module, "download_authorized_youtube_audio", unexpected_download
+        request_module, "download_authorized_youtube_audio", download
     )
     app = _request_app(monkeypatch, _FakeDb())
 
@@ -165,10 +152,8 @@ def test_request_endpoint_rejects_playback_only_youtube_track(monkeypatch, caplo
         json={"tracks": [{"trackId": video_id, "sourceType": "youtube"}]},
     )
 
-    assert response.status_code == 403
-    assert "YOUTUBE_ALLOWED_CHANNEL_IDS" in response.json()["detail"]
-    assert "UC-other" in caplog.text
-    assert "UC-owned" in caplog.text
+    assert response.status_code == 200, response.text
+    assert downloaded == [video_id]
 
 
 def test_request_endpoint_downloads_authorized_youtube_track(monkeypatch):

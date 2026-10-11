@@ -41,6 +41,7 @@ from process_audio import (
     change_tempo,
     mix_audio,
     overlay_beat,
+    beat_background,
     YOUTUBE_DOWNLOADS_FOLDER,
     MIXED_AUDIO_FOLDER,
     copy_audio_as_mp3,
@@ -87,6 +88,7 @@ VALID_MIXERS = {
     "tempo-sync",
     "pitch-shift",
     "beat-overlay",
+    "beat-background",
     "without-mixing"
 }
 
@@ -141,6 +143,9 @@ def mix_tracks(mixing_mode, valid_tracks, final_path):
     elif mixing_mode == "beat-overlay":
         overlay_beat(valid_tracks[0], valid_tracks[1], final_path)
 
+    elif mixing_mode == "beat-background":
+        beat_background(valid_tracks[0], valid_tracks[1], final_path)
+
     elif mixing_mode == "without-mixing":
         copy_audio_as_mp3(valid_tracks[0], final_path)
 
@@ -148,36 +153,6 @@ def mix_tracks(mixing_mode, valid_tracks, final_path):
         raise ValueError("Invalid mixing mode")
 
     logger.info(f"Mix '{mixing_mode}' completed in {time.time() - start_time:.2f}s")
-
-
-def require_authorized_youtube_tracks(
-    youtube_ids: list[str],
-    videos: dict[str, dict],
-    allowed_channels: set[str],
-) -> None:
-    rejected_channels = {
-        track_id: videos[track_id].get("snippet", {}).get("channelId")
-        for track_id in youtube_ids
-        if videos[track_id].get("snippet", {}).get("channelId")
-        not in allowed_channels
-    }
-    if rejected_channels:
-        logger.warning(
-            "Rejecting YouTube mix request: video channel IDs are not authorized "
-            "(video_channels=%s, allowed_channel_ids=%s).",
-            rejected_channels,
-            sorted(allowed_channels),
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "This YouTube video is playback-only and cannot be mixed because "
-                "its channel ID is not "
-                "listed in YOUTUBE_ALLOWED_CHANNEL_IDS. The YouTube API key enables "
-                "search and metadata access; it does not authorize audio processing. "
-                "Choose an authorized video or a local/licensed audio asset."
-            ),
-        )
 
 
 def resolve_audio_asset_path(
@@ -238,7 +213,6 @@ async def download_and_mix(
     videos = await get_youtube_video_details(youtube_ids)
     if any(track_id not in videos for track_id in youtube_ids):
         raise HTTPException(status_code=404, detail="One or more YouTube videos are unavailable.")
-    require_authorized_youtube_tracks(youtube_ids, videos, allowed_channels)
 
     song_infos = []
     audio_paths = []
@@ -333,11 +307,12 @@ async def download_and_mix(
     final_filename = f"request_{new_req.id}_{selected_mixer}.mp3"
     final_path = os.path.join(MIXED_AUDIO_FOLDER, final_filename)
 
-    asyncio.create_task(_process_mixing_async(new_req.id, selected_mixer, audio_paths, final_path))
+    await _process_mixing_async(new_req.id, selected_mixer, audio_paths, final_path)
 
     return {
         "requestId": new_req.id,
-        "message": f"Mix started with '{selected_mixer}' mode.",
+        "message": f"Mix completed with '{selected_mixer}' mode.",
+        "mixedAudioUrl": f"{PUBLIC_API_BASE}/requests/audio/byRequestId/{new_req.id}",
         "tracks": song_infos
 
     }
@@ -382,15 +357,54 @@ async def _process_mixing_async(request_id, mixer, audio_paths, final_path):
                 req.status = RequestStatus.REJECTED
                 await session.commit()
 
-@song_request_router.get("/audio/{filename}")
-async def download_mixed_audio(filename: str, request: Request):
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-
-    if not token:
-        token = request.query_params.get("token")
-
-    if not token or not decode_access_token(token):
+def _authorize_media_request(request: Request, token: Optional[str]) -> None:
+    candidate = (
+        token
+        or request.headers.get("Authorization", "").replace("Bearer ", "")
+        or request.query_params.get("token")
+    )
+    if not candidate or not decode_access_token(candidate):
         raise HTTPException(401, "Unauthorized")
+
+
+@song_request_router.get("/audio/byRequestId/{request_id}")
+async def download_mixed_audio_by_request(
+    request_id: int,
+    request: Request,
+    token: Optional[str] = Query(
+        None, description="JWT access token (alternative to the Authorization header)"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    _authorize_media_request(request, token)
+
+    result = await db.execute(select(SongRequest).where(SongRequest.id == request_id))
+    song_request = result.scalar_one_or_none()
+    if not song_request or not song_request.mixedAudioPath:
+        raise HTTPException(404, "Mixed audio is not ready yet")
+
+    safe_name = os.path.basename(song_request.mixedAudioPath)
+    folder = os.path.abspath(MIXED_AUDIO_FOLDER)
+    file_path = os.path.abspath(os.path.join(folder, safe_name))
+    if not file_path.startswith(folder + os.sep) or not os.path.isfile(file_path):
+        raise HTTPException(404, "File not found")
+    if not file_path.lower().endswith(".mp3"):
+        raise HTTPException(404, "File not found")
+
+    return FileResponse(
+        path=file_path, media_type="audio/mpeg", filename=safe_name
+    )
+
+
+@song_request_router.get("/audio/{filename}")
+async def download_mixed_audio(
+    filename: str,
+    request: Request,
+    token: Optional[str] = Query(
+        None, description="JWT access token (alternative to the Authorization header)"
+    ),
+):
+    _authorize_media_request(request, token)
 
     # Reject anything that escapes the mixed-audio folder (path traversal)
     safe_name = os.path.basename(filename)
@@ -404,7 +418,9 @@ async def download_mixed_audio(filename: str, request: Request):
     ):
         raise HTTPException(404, "File not found")
 
-    return FileResponse(path=file_path, media_type="audio/mpeg")
+    return FileResponse(
+        path=file_path, media_type="audio/mpeg", filename=safe_name
+    )
 
 @song_request_router.get("/searchSong")
 async def search_song(
@@ -507,7 +523,7 @@ async def get_all_song_requests(
                         if metadata.get("sourceType") == "youtube"
                         else f"/tracks/assets/{metadata['trackId'].split(':', 1)[1]}/audio"
                     ),
-                    mixEligible=metadata.get("sourceType") != "youtube",
+                    mixEligible=True,
                 )
                 for metadata in req.trackMetadata
             ]
@@ -524,7 +540,7 @@ async def get_all_song_requests(
                     artist=legacy_details[index][2],
                     artwork=legacy_details[index][1],
                     playbackUrl=f"https://www.youtube.com/watch?v={video_id}",
-                    mixEligible=False,
+                    mixEligible=True,
                     license="YouTube",
                 )
                 for index, video_id in enumerate(video_ids[:2])

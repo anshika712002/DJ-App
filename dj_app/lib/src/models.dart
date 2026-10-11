@@ -175,5 +175,6 @@ const List<String> kMixers = [
   'tempo-sync',
   'pitch-shift',
   'beat-overlay',
+  'beat-background',
   'without-mixing',
 ];
