@@ -15,10 +15,14 @@ from pydub.effects import normalize
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Downloaded YouTube source tracks (only from configured authorized channels)
-YOUTUBE_DOWNLOADS_FOLDER = os.path.join(BASE_DIR, "youtube_downloads")
+YOUTUBE_DOWNLOADS_FOLDER = os.getenv(
+    "YOUTUBE_DOWNLOADS_DIR", os.path.join(BASE_DIR, "youtube_downloads")
+)
 
 # Mixed audio output, also exposed as static /audio
-MIXED_AUDIO_FOLDER = os.path.join(BASE_DIR, "uploads", "mixed_audio")
+MIXED_AUDIO_FOLDER = os.getenv(
+    "MIXED_AUDIO_DIR", os.path.join(BASE_DIR, "uploads", "mixed_audio")
+)
 
 os.makedirs(YOUTUBE_DOWNLOADS_FOLDER, exist_ok=True)
 os.makedirs(MIXED_AUDIO_FOLDER, exist_ok=True)

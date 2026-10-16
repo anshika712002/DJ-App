@@ -12,13 +12,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-SECRET_KEY = os.getenv("SECRET_KEY", "mysecret")
-
-if SECRET_KEY == "mysecret":
-    logger.warning("Using default SECRET_KEY ")
-
+SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    raise ValueError("❌ SECRET_KEY is missing.")
+    raise ValueError("SECRET_KEY is missing.")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 720  #min

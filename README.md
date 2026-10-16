@@ -240,6 +240,35 @@ YouTube results use the shared Track fields `trackId`, `sourceType`, `title`,
 playback-only tracks are not selectable for mixing. Local/library uploads can
 be searched and selected in Flutter through the authenticated API/Swagger.
 
+## Render staging (Docker)
+
+The repository includes a root `Dockerfile` that installs FFmpeg and starts
+Uvicorn from `music_backend/` so the backend's flat imports resolve. It binds
+to Render's `PORT` (defaulting to `10000` for local container runs). Use the
+repository root as the service root and Docker as the runtime. `.dockerignore`
+excludes local environment files, tests, caches, and media from the image build
+context; it does not remove those files from Git.
+
+Configure these variables in the Render service environment, never in source:
+`DATABASE_URL`, `SECRET_KEY`, `YOUTUBE_API_KEY`, and, for authorized YouTube
+audio processing, `YOUTUBE_ALLOWED_CHANNEL_ID` or
+`YOUTUBE_ALLOWED_CHANNEL_IDS`. `CORS_ORIGINS` can restrict browser clients.
+The optional `YOUTUBE_DOWNLOADS_DIR`, `MIXED_AUDIO_DIR`, and `AUDIO_ASSET_DIR`
+can point to configured storage; the existing local defaults are unchanged.
+
+The service exposes `/health/live` for process liveness and `/health/ready` for
+a database readiness check. Run migrations once, deliberately, from the
+repository root with `alembic upgrade head` after verifying the target
+`DATABASE_URL`; migrations are not run automatically at service startup.
+
+Render's free service filesystem is ephemeral. Uploaded audio and completed
+mixes may disappear after sleep, restart, or redeploy, so free staging verifies
+only the workflow while files remain available on the running instance. A free
+Render Postgres database expires 30 days after creation and is deleted after a
+14-day upgrade grace period. Keep a separate export if the staging data matters.
+The first request after a free web service sleeps can take about a minute to
+wake it.
+
 ---
 
 ## Troubleshooting

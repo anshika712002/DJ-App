@@ -12,11 +12,12 @@ for _stream in (sys.stdout, sys.stderr):
 # import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 import os
+import logging
 # from sqlalchemy.ext.asyncio import AsyncSession
 # from database import get_db
 from auth import auth_router
@@ -24,8 +25,11 @@ from database import  async_engine, Base
 from user import user_router
 from song_requests import song_request_router 
 from audio_assets import audio_asset_router
-from sqlalchemy import text 
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from database import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
 
 print("✅ FastAPI server is starting...") 
 
@@ -52,7 +56,7 @@ async def lifespan(app: FastAPI):
         else:
             print("✅ Database connected, schema OK (managed by Alembic)")
     except Exception as e:
-        print("❌ Failed to connect to the database:", e)
+        logger.error("Database startup check failed (%s)", type(e).__name__)
         print("   Check DATABASE_URL in .env and that PostgreSQL is running "
               "(scripts\\start_postgres.ps1)")
     yield
@@ -92,6 +96,22 @@ app.include_router(audio_asset_router)
 @app.get("/")
 def home():
     return {"message": "Welcome to Music App Backend!"}
+
+
+@app.get("/health/live", include_in_schema=False)
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def health_ready():
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        logger.warning("Database readiness check failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {"status": "ok", "database": "ok"}
 
 # @app.get("/auth/protected")
 # async def protected_route(
