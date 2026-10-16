@@ -1,14 +1,12 @@
-enum UserRole { user, dj }
-
-UserRole parseRole(String value) =>
-    UserRole.values.firstWhere((r) => r.name == value, orElse: () => UserRole.user);
-
 const Set<String> kRequestStatuses = {
   'pending',
   'accepted',
   'rejected',
   'playing',
   'played',
+  'ready',
+  'completed',
+  'failed',
 };
 
 String statusLabel(String status) {
@@ -37,52 +35,40 @@ class AuthSession {
   final String accessToken;
   final String refreshToken;
   final String userName;
-  final String role;
   final String? phone;
   final String? email;
-  final String? restaurantName;
 
   const AuthSession({
     required this.accessToken,
     required this.refreshToken,
     required this.userName,
-    required this.role,
     this.phone,
     this.email,
-    this.restaurantName,
   });
 
   factory AuthSession.fromJson(Map<String, dynamic> json) => AuthSession(
         accessToken: json['accessToken'] as String,
         refreshToken: json['refreshToken'] as String? ?? '',
         userName: json['userName'] as String? ?? '',
-        role: json['role'] as String? ?? 'user',
         phone: json['phone'] as String?,
         email: json['email'] as String?,
-        restaurantName: json['restaurantName'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'accessToken': accessToken,
         'refreshToken': refreshToken,
         'userName': userName,
-        'role': role,
         'phone': phone,
         'email': email,
-        'restaurantName': restaurantName,
       };
 
   AuthSession copyWith({String? accessToken, String? refreshToken}) => AuthSession(
         accessToken: accessToken ?? this.accessToken,
         refreshToken: refreshToken ?? this.refreshToken,
         userName: userName,
-        role: role,
         phone: phone,
         email: email,
-        restaurantName: restaurantName,
       );
-
-  UserRole get userRole => parseRole(role);
 }
 
 class Song {
@@ -122,6 +108,15 @@ class Song {
         license: json['license'] as String?,
         attribution: json['attribution'] as String?,
       );
+
+  /// A track is uniquely identified by its source + id, so selection and
+  /// de-duplication behave predictably across re-renders and refreshes.
+  @override
+  bool operator ==(Object other) =>
+      other is Song && other.trackId == trackId && other.sourceType == sourceType;
+
+  @override
+  int get hashCode => Object.hash(trackId, sourceType);
 }
 
 class RequestItem {
@@ -135,7 +130,6 @@ class RequestItem {
   final String requestedAt;
   final String? playedAt;
   final List<Song> songs;
-  final String? restaurantName;
 
   const RequestItem({
     required this.id,
@@ -148,7 +142,6 @@ class RequestItem {
     required this.requestedAt,
     required this.playedAt,
     required this.songs,
-    required this.restaurantName,
   });
 
   factory RequestItem.fromJson(Map<String, dynamic> json) => RequestItem(
@@ -164,7 +157,6 @@ class RequestItem {
         songs: (json['requestedSongs'] as List<dynamic>? ?? [])
             .map((s) => Song.fromJson(s as Map<String, dynamic>))
             .toList(),
-        restaurantName: json['restaurantName'] as String?,
       );
 }
 

@@ -24,6 +24,16 @@ class SongApi {
         .toList();
   }
 
+  /// Genuine recent searches for the authenticated user (newest first). Used
+  /// only for the clearly-labelled history section, never as fresh results.
+  Future<List<String>> searchHistory() async {
+    final raw = await _api.get('/requests/searchHistory');
+    final queries = _map(raw)?['queries'];
+    return (queries as List<dynamic>? ?? [])
+        .whereType<String>()
+        .toList(growable: false);
+  }
+
   Future<List<Song>> searchAssets(String query) async {
     final raw = await _api.get('/tracks/assets', query: {'q': query});
     return (raw as List<dynamic>? ?? [])
@@ -54,22 +64,15 @@ class SongApi {
     return requestId.toInt();
   }
 
-  Future<List<RequestItem>> all({bool mineOnly = false, String? status}) async {
-    final query = <String, String>{'mineOnly': mineOnly.toString()};
-    if (status != null) query['status'] = status;
-    final raw = await _api.get('/requests/allSongs', query: query);
+  /// The authenticated user's own requests (the backend scopes this to the
+  /// caller). Newest first.
+  Future<List<RequestItem>> all() async {
+    final raw = await _api.get('/requests/allSongs');
     final data = _map(raw)?['data'];
     return (data as List<dynamic>? ?? [])
         .map((e) => RequestItem.fromJson(e as Map<String, dynamic>))
         .toList();
   }
-
-  Future<void> accept(int id) => _api.put('/requests/accept/$id');
-
-  Future<void> reject(int id) => _api.put('/requests/reject/$id');
-
-  Future<void> updateStatus(int id, String status) =>
-      _api.put('/requests/updateStatus/$id', body: {'status': status});
 
   /// The backend accepts the token as a query parameter so media players that
   /// cannot send an Authorization header can still stream the file.

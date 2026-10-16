@@ -26,22 +26,14 @@ class RequestStatus(str, Enum):
     READY = "ready"
 
 
-class Restaurant(Base):
-    __tablename__ = "restaurants"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False)
-    location = Column(String(100), nullable=True)
-    contactNumber = Column(String(20), nullable=True)
-    email = Column(String(100), nullable=True)
-    isActive = Column(Boolean, default=True)
-    createdAt = Column(DateTime, default=func.now())
-    updatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
-
-    roles = relationship("RoleMaster", back_populates="restaurant")
-
-
 class RoleMaster(Base):
+    """Role reference data.
+
+    The application is single-role (every account is a plain "user"), but the
+    role table and the ``users.roleId`` foreign key are retained so existing
+    accounts and their history keep working without a destructive migration.
+    """
+
     __tablename__ = "role_master"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -50,9 +42,6 @@ class RoleMaster(Base):
     isActive = Column(Boolean, default=True)
     createdAt = Column(DateTime, default=func.now())
 
-    restaurantId = Column(Integer, ForeignKey("restaurants.id"), nullable=True)
-
-    restaurant = relationship("Restaurant", back_populates="roles")
     users = relationship("User", back_populates="roleObj")
 
 
@@ -65,8 +54,6 @@ class User(Base):
     password = Column(String, nullable=False)
     roleId = Column(Integer, ForeignKey("role_master.id"), nullable=False)
     phone = Column(String, nullable=False)
-    restaurantName = Column(String, nullable=True)
-    restaurantId = Column(Integer, ForeignKey("restaurants.id"), nullable=True)
 
     roleObj = relationship("RoleMaster", back_populates="users")
     refreshTokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
@@ -158,8 +145,6 @@ class SongRequest(Base):
     videoTitle2 = Column(String, nullable=True)
     videoThumbnail2 = Column(String, nullable=True)
     videoArtist2 = Column(String, nullable=True)
-
-    restaurantName = Column(String, nullable=True)
 
     requester = relationship("User", foreign_keys=[requesterId])
 

@@ -1,7 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr
 from typing import Literal, Optional, List
-from enum import Enum
-from datetime import datetime
 
 
 class UserCreate(BaseModel):
@@ -9,14 +7,16 @@ class UserCreate(BaseModel):
     email: Optional[EmailStr] = None
     password: str
     phone: str
-    role: str
-    restaurantName: Optional[str] = None
+    # Accepted for backward compatibility but ignored: every new account is a
+    # plain "user" (single-role application).
+    role: Optional[str] = None
 
 
 class UserLogin(BaseModel):
     identifier: str  # phone or email
     password: str
-    role: str
+    # Optional: when omitted, the account is looked up by identifier alone.
+    role: Optional[str] = None
 
 
 class UserSignupResponse(BaseModel):
@@ -26,7 +26,6 @@ class UserSignupResponse(BaseModel):
     email: Optional[EmailStr] = None
     roleId: Optional[int] = None
     role: Optional[str] = None
-    restaurantName: Optional[str] = None
 
 
 class UserLoginResponse(BaseModel):
@@ -37,7 +36,6 @@ class UserLoginResponse(BaseModel):
     phone: str
     email: Optional[EmailStr] = None
     role: Optional[str] = None
-    restaurantName: Optional[str] = None
 
 class TokenRefreshResponse(BaseModel):
     accessToken: str
@@ -78,24 +76,6 @@ class SongMixRequest(BaseModel):
     mixer: Optional[str] = None
 
 
-class StatusEnum(str, Enum):
-    pending = "pending"
-    accepted = "accepted"
-    rejected = "rejected"
-    playing = "playing"
-    played = "played"
-
-class StatusUpdateSchema(BaseModel):
-    status: StatusEnum
-
-class SongRequestResponse(BaseModel):
-    id: int
-    songName: Optional[str]
-    songName2: Optional[str]
-    status: Optional[str]
-    mixedAudioUrl: Optional[str]
-    tipAmount: Optional[float]
-
 class SongRequestSimplifiedResponse(BaseModel):
     songRequestId: int
     songStatus: str
@@ -107,7 +87,6 @@ class SongRequestSimplifiedResponse(BaseModel):
     requestedAt: Optional[str]
     playedAt: Optional[str]
     requestedSongs: List[Track]
-    restaurantName: Optional[str]
 
 class AllSongResponseWrapper(BaseModel):
     data: List[SongRequestSimplifiedResponse]

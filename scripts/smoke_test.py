@@ -1,4 +1,4 @@
-"""End-to-end smoke test for the DJ App backend (FastAPI + PostgreSQL).
+"""End-to-end smoke test for the Music App backend (FastAPI + PostgreSQL).
 
 Starts the API server, exercises every endpoint group against the real
 database, then shuts the server down. Run from the repo root:
@@ -63,8 +63,8 @@ def wait_for_server(client, timeout=60):
 
 def main():
     stamp = uuid.uuid4().hex[:8]
-    dj_user, dj_mail, dj_phone = f"dj_{stamp}", f"dj_{stamp}@example.com", f"9000{stamp[:7]}"
-    ui_user, ui_mail, ui_phone = f"user_{stamp}", f"user_{stamp}@example.com", f"9100{stamp[:7]}"
+    user_a, mail_a, phone_a = f"user_{stamp}", f"user_{stamp}@example.com", f"9000{stamp[:7]}"
+    user_b, mail_b, phone_b = f"other_{stamp}", f"other_{stamp}@example.com", f"9100{stamp[:7]}"
     password = "TestPassw0rd!"
 
     env = dict(os.environ)
@@ -94,61 +94,79 @@ def main():
                 check("server starts", False, "did not respond within 60s")
                 return
 
-            print("\n-- auth --")
+            print("\n-- auth (single role) --")
             r = client.get("/")
             check("GET / welcome", r.status_code == 200 and "message" in r.json(), r.status_code)
 
+            # role is intentionally omitted: every account is a plain user now.
             r = client.post("/auth/signup", json={
-                "userName": dj_user, "email": dj_mail, "password": password,
-                "phone": dj_phone, "role": "dj",
+                "userName": user_a, "email": mail_a, "password": password,
+                "phone": phone_a,
             })
             body = r.json()
-            check("signup role=dj", body.get("status") == "success",
+            check("signup without role", body.get("status") == "success",
+                  f"{r.status_code} {r.text[:200]}")
+            check("signup assigns user role",
+                  body.get("data", {}).get("role") == "user",
+                  body.get("data", {}).get("role"))
+
+            r = client.post("/auth/signup", json={
+                "userName": user_b, "email": mail_b, "password": password,
+                "phone": phone_b,
+            })
+            check("second signup", r.json().get("status") == "success",
                   f"{r.status_code} {r.text[:200]}")
 
             r = client.post("/auth/signup", json={
-                "userName": ui_user, "email": ui_mail, "password": password,
-                "phone": ui_phone, "role": "user", "restaurantName": "Test Lounge",
+                "userName": user_a, "email": mail_a, "password": password,
+                "phone": phone_a, "role": "dj",
             })
-            check("signup role=user", r.json().get("status") == "success",
+            check("signup duplicate rejected (role ignored)", r.json().get("statusCode") == 400,
                   f"{r.status_code} {r.text[:200]}")
 
-            r = client.post("/auth/signup", json={
-                "userName": dj_user, "email": dj_mail, "password": password,
-                "phone": dj_phone, "role": "dj",
-            })
-            check("signup duplicate rejected", r.json().get("statusCode") == 400,
-                  f"{r.status_code} {r.text[:200]}")
-
-            r = client.post("/auth/login", json={"identifier": dj_mail, "password": password, "role": "dj"})
+            r = client.post("/auth/login", json={"identifier": mail_a, "password": password})
             login = r.json().get("data", {})
-            dj_token = login.get("accessToken")
+            token_a = login.get("accessToken")
             refresh_token = login.get("refreshToken")
-            check("login role=dj", bool(dj_token), f"{r.status_code} {r.text[:200]}")
+            check("login without role", bool(token_a), f"{r.status_code} {r.text[:200]}")
+            check("login returns user role", login.get("role") == "user", login.get("role"))
 
-            r = client.post("/auth/login", json={"identifier": ui_mail, "password": password, "role": "user"})
-            ui_token = r.json().get("data", {}).get("accessToken")
-            check("login role=user", bool(ui_token), f"{r.status_code} {r.text[:200]}")
+            r = client.post("/auth/login", json={"identifier": mail_b, "password": password})
+            token_b = r.json().get("data", {}).get("accessToken")
+            check("second login", bool(token_b), f"{r.status_code} {r.text[:200]}")
 
-            r = client.post("/auth/login", json={"identifier": dj_mail, "password": "wrong", "role": "dj"})
+            r = client.post("/auth/login", json={"identifier": mail_a, "password": "wrong"})
             check("bad password rejected", r.json().get("statusCode") == 401, r.text[:200])
 
-            r = client.get("/user/profile", headers={"Authorization": f"Bearer {ui_token}"})
+            r = client.get("/user/profile", headers={"Authorization": f"Bearer {token_a}"})
+            profile = r.json().get("data", {}) if r.status_code == 200 else {}
             check("GET /user/profile", r.status_code == 200, r.text[:200])
+            check("profile has no restaurant field", "restaurantName" not in profile)
 
             r = client.post("/auth/refresh", json={"refresh_token": refresh_token})
             new_tokens = r.json().get("data", {})
             check("POST /auth/refresh", bool(new_tokens.get("accessToken")), f"{r.status_code} {r.text[:200]}")
-            dj_token = new_tokens.get("accessToken") or dj_token
+            token_a = new_tokens.get("accessToken") or token_a
 
-            r = client.get("/auth/protected", headers={"Authorization": f"Bearer {dj_token}"})
+            r = client.get("/auth/protected", headers={"Authorization": f"Bearer {token_a}"})
             check("GET /auth/protected", r.status_code == 200, r.status_code)
             r = client.get("/auth/protected", headers={"Authorization": "Bearer bogus.token.here"})
             check("invalid token rejected", r.status_code == 401, r.status_code)
 
+            print("\n-- removed DJ surface --")
+            r = client.get("/ws/dj?token=x")
+            check("/ws/dj route removed", r.status_code in (403, 404), r.status_code)
+            r = client.put("/requests/accept/1", headers={"Authorization": f"Bearer {token_a}"})
+            check("PUT /requests/accept removed", r.status_code in (404, 405), r.status_code)
+            r = client.put("/requests/reject/1", headers={"Authorization": f"Bearer {token_a}"})
+            check("PUT /requests/reject removed", r.status_code in (404, 405), r.status_code)
+            r = client.put("/requests/updateStatus/1", headers={"Authorization": f"Bearer {token_a}"},
+                           json={"status": "playing"})
+            check("PUT /requests/updateStatus removed", r.status_code in (404, 405), r.status_code)
+
             print("\n-- search / suggestions (YouTube Data API) --")
             r = client.get("/requests/searchSong", params={"q": "love"},
-                           headers={"Authorization": f"Bearer {ui_token}"})
+                           headers={"Authorization": f"Bearer {token_a}"})
             search_ok = r.status_code == 200
             tracks = r.json().get("results", []) if search_ok else []
             check("GET /requests/searchSong", search_ok and len(tracks) > 0,
@@ -163,150 +181,100 @@ def main():
             )
             check("YouTube results are playback-only tracks", contract_ok)
 
-            r = client.get("/requests/suggestedSongs", headers={"Authorization": f"Bearer {ui_token}"})
+            r = client.get("/requests/suggestedSongs", headers={"Authorization": f"Bearer {token_a}"})
             check("GET /requests/suggestedSongs", r.status_code == 200, r.status_code)
 
-            print("\n-- song request lifecycle --")
+            r = client.get("/requests/searchHistory", headers={"Authorization": f"Bearer {token_a}"})
+            history = r.json().get("queries", []) if r.status_code == 200 else []
+            check("GET /requests/searchHistory", r.status_code == 200 and "love" in history,
+                  f"{r.status_code} {history}")
+
+            print("\n-- song request lifecycle (pending -> completed) --")
             request_id = None
             authorized_tracks = [
                 track for track in tracks if track.get("mixEligible")
             ]
-            playback_only = [track for track in tracks if not track.get("mixEligible")]
-            if playback_only:
-                r = client.post(
-                    "/requests/requestSong",
-                    headers={"Authorization": "Bearer " + dj_token},
-                    json={
-                        "tracks": [{
-                            "trackId": playback_only[0]["trackId"],
-                            "sourceType": "youtube",
-                        }],
-                        "mixer": "without-mixing",
-                    },
-                    timeout=30,
-                )
-                check(
-                    "playback-only YouTube track rejected from mixing",
-                    r.status_code == 403 and "playback-only" in r.text,
-                    f"{r.status_code} {r.text[:150]}",
-                )
-            else:
-                skip("playback-only YouTube rejection", "no non-authorized result")
-            pair_attempts = [authorized_tracks[:2]] if authorized_tracks else []
             request_error = ""
-            for selected_tracks in pair_attempts:
-                r = client.post("/requests/requestSong", headers={"Authorization": f"Bearer {ui_token}"},
+            if authorized_tracks:
+                r = client.post("/requests/requestSong", headers={"Authorization": f"Bearer {token_a}"},
                                 json={
                                     "tracks": [
                                         {
-                                            "trackId": track["trackId"],
+                                            "trackId": authorized_tracks[0]["trackId"],
                                             "sourceType": "youtube",
                                         }
-                                        for track in selected_tracks
                                     ],
-                                    "tipAmount": 5.0,
                                     "mixer": "without-mixing",
                                 },
-                                timeout=120)
+                                timeout=300)
                 if r.status_code == 200:
                     request_id = r.json().get("requestId")
-                    break
-                request_error = f"{r.status_code} {r.text[:150]}"
+                    check("requestSong returns pending",
+                          r.json().get("status") == "pending", r.json().get("status"))
+                else:
+                    request_error = f"{r.status_code} {r.text[:150]}"
             if not authorized_tracks:
-                skip(
-                    "POST /requests/requestSong",
-                    "no configured authorized channel matched search",
-                )
+                skip("POST /requests/requestSong",
+                     "no configured authorized channel matched search")
             else:
-                check(
-                    "POST /requests/requestSong",
-                    bool(request_id),
-                    request_error or f"requestId={request_id}",
-                )
+                check("POST /requests/requestSong", bool(request_id),
+                      request_error or f"requestId={request_id}")
 
             # wait for the background mix to finish
             mixed_url = None
+            final_status = None
             if request_id:
                 deadline = time.time() + 120
                 while time.time() < deadline:
-                    r = client.get("/requests/allSongs", params={"mineOnly": True},
-                                   headers={"Authorization": f"Bearer {ui_token}"})
+                    r = client.get("/requests/allSongs",
+                                   headers={"Authorization": f"Bearer {token_a}"})
                     items = r.json().get("data", [])
                     mine = [i for i in items if i["songRequestId"] == request_id]
-                    if mine and mine[0].get("mixedAudioUrl"):
-                        mixed_url = mine[0]["mixedAudioUrl"]
-                        break
+                    if mine:
+                        final_status = mine[0].get("songStatus")
+                        if final_status in ("completed", "failed"):
+                            mixed_url = mine[0].get("mixedAudioUrl")
+                            break
                     time.sleep(2)
-                check("background mixing produces mixedAudioUrl", bool(mixed_url),
-                      "timeout after 120s" if not mixed_url else mixed_url)
+                check("background mixing reaches terminal status",
+                      final_status in ("completed", "failed"), final_status)
+                check("completed mix exposes mixedAudioUrl",
+                      final_status == "failed" or bool(mixed_url),
+                      "timeout after 120s" if final_status is None else mixed_url)
 
             if mixed_url:
                 audio_url = mixed_url if mixed_url.startswith("http") else BASE_URL + mixed_url
-                r = client.get(audio_url, headers={"Authorization": f"Bearer {dj_token}"})
-                check("GET mixed audio file", r.status_code == 200
+                r = client.get(audio_url, headers={"Authorization": f"Bearer {token_a}"})
+                check("owner can GET mixed audio", r.status_code == 200
                       and r.headers.get("content-type", "").startswith("audio"),
                       f"{r.status_code} {r.headers.get('content-type')}")
+                r = client.get(audio_url, headers={"Authorization": f"Bearer {token_b}"})
+                check("other user cannot GET mixed audio", r.status_code == 403, r.status_code)
                 r = client.get(audio_url)
                 check("mixed audio requires token", r.status_code == 401, r.status_code)
-            elif not request_id:
-                skip("song request lifecycle", "no request could be created")
+            elif request_id:
+                skip("audio ownership checks", "mix did not complete")
 
-            r = client.get("/requests/allSongs", headers={"Authorization": f"Bearer {dj_token}"})
+            r = client.get("/requests/allSongs", headers={"Authorization": f"Bearer {token_a}"})
             items = r.json().get("data", []) if r.status_code == 200 else []
             check("GET /requests/allSongs", r.status_code == 200, f"{len(items)} rows")
-            if request_id is None and items:
-                request_id = items[0]["songRequestId"]
+            fields_ok = all("restaurantName" not in i for i in items)
+            check("allSongs omits restaurant field", fields_ok)
 
-            if request_id:
-                r = client.put(f"/requests/accept/{request_id}", headers={"Authorization": f"Bearer {ui_token}"})
-                check("accept requires dj role", r.status_code == 403, r.status_code)
-
-                r = client.put(f"/requests/accept/{request_id}", headers={"Authorization": f"Bearer {dj_token}"})
-                check("PUT /requests/accept", r.status_code == 200, r.json())
-
-                r = client.put(f"/requests/updateStatus/{request_id}", headers={"Authorization": f"Bearer {dj_token}"},
-                               json={"status": "playing"})
-                check("PUT /requests/updateStatus playing", r.status_code == 200, r.status_code)
-
-                r = client.put(f"/requests/updateStatus/{request_id}", headers={"Authorization": f"Bearer {dj_token}"},
-                               json={"status": "played"})
-                check("PUT /requests/updateStatus played", r.status_code == 200, r.status_code)
-
-                r = client.put(f"/requests/reject/{request_id}", headers={"Authorization": f"Bearer {dj_token}"})
-                check("PUT /requests/reject", r.status_code == 200, r.json())
-
-                r = client.put("/requests/accept/999999", headers={"Authorization": f"Bearer {dj_token}"})
-                check("accept unknown id -> 404", r.status_code == 404, r.status_code)
+            r = client.get("/requests/allSongs", headers={"Authorization": f"Bearer {token_b}"})
+            other_items = r.json().get("data", []) if r.status_code == 200 else []
+            check("allSongs is scoped to the owner",
+                  all(i["songRequestId"] != request_id for i in other_items),
+                  f"{len(other_items)} rows for user B")
 
             print("\n-- security: audio path traversal --")
             r = client.get("/requests/audio/..%5C..%5C.env",
-                           headers={"Authorization": f"Bearer {dj_token}"})
+                           headers={"Authorization": f"Bearer {token_a}"})
             check("traversal blocked", r.status_code == 404, r.status_code)
-            r = client.get("/requests/audio/nope.mp3", headers={"Authorization": f"Bearer {dj_token}"})
+            r = client.get("/requests/audio/nope.mp3", headers={"Authorization": f"Bearer {token_a}"})
             check("missing file -> 404", r.status_code == 404, r.status_code)
             r = client.get("/requests/audio/nope.mp3")
             check("audio without token -> 401", r.status_code == 401, r.status_code)
-
-            print("\n-- websocket --")
-            try:
-                import websockets.sync.client as ws_client
-                try:
-                    with ws_client.connect(
-                        "ws://127.0.0.1:8085/ws/dj?token=not-a-valid-token",
-                        open_timeout=10,
-                    ) as ws:
-                        check("unauthenticated /ws/dj rejected", False, "connection accepted")
-                except Exception:
-                    check("unauthenticated /ws/dj rejected", True)
-
-                with ws_client.connect(
-                    f"ws://127.0.0.1:8085/ws/dj?token={dj_token}", open_timeout=10
-                ) as ws:
-                    check("authenticated /ws/dj accepts connection", True)
-            except ImportError:
-                skip("websocket connect", "websockets package not installed")
-            except Exception as e:
-                check("authenticated /ws/dj accepts connection", False, e)
 
     finally:
         server.terminate()

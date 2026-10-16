@@ -17,14 +17,6 @@ void main() {
     });
   });
 
-  group('parseRole', () {
-    test('parses backend roles', () {
-      expect(parseRole('dj'), UserRole.dj);
-      expect(parseRole('user'), UserRole.user);
-      expect(parseRole('admin'), UserRole.user);
-    });
-  });
-
   group('Song.fromJson', () {
     test('accepts legacy and fallback ID keys', () {
       expect(Song.fromJson({'videoId': 'abc'}).trackId, 'abc');
@@ -88,7 +80,6 @@ void main() {
           {'trackId': 'a', 'sourceType': 'youtube', 'title': 'Nightcall'},
           {'trackId': 'b', 'sourceType': 'youtube', 'title': 'Sunrise'},
         ],
-        'restaurantName': 'Cafe Wave',
       });
 
       expect(item.id, 12);
@@ -97,7 +88,6 @@ void main() {
       expect(item.tipAmount, 5.5);
       expect(item.mixerType, 'crossfade');
       expect(item.requestedBy, 'anshika');
-      expect(item.restaurantName, 'Cafe Wave');
       expect(item.songs, hasLength(2));
       expect(item.songs.first.trackId, 'a');
       expect(item.playedAt, isNull);
@@ -115,7 +105,6 @@ void main() {
         'requestedAt': null,
         'playedAt': null,
         'requestedSongs': null,
-        'restaurantName': null,
       });
       expect(item.status, 'pending');
       expect(item.mixSongTitle, '');
@@ -129,25 +118,19 @@ void main() {
       accessToken: 'a1',
       refreshToken: 'r1',
       userName: 'anshika',
-      role: 'dj',
     );
-
-    test('derives the user role', () {
-      expect(session.userRole, UserRole.dj);
-    });
 
     test('copyWith only replaces the given tokens', () {
       final updated = session.copyWith(accessToken: 'a2');
       expect(updated.accessToken, 'a2');
       expect(updated.refreshToken, 'r1');
       expect(updated.userName, 'anshika');
-      expect(updated.role, 'dj');
     });
 
     test('round-trips through JSON', () {
       final parsed = AuthSession.fromJson(session.toJson());
       expect(parsed.accessToken, 'a1');
-      expect(parsed.role, 'dj');
+      expect(parsed.refreshToken, 'r1');
       expect(parsed.userName, 'anshika');
     });
   });

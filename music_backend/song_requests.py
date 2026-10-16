@@ -1,4 +1,4 @@
-import logging, os, asyncio, re, emoji, time
+﻿import logging, os, asyncio, re, emoji, time, random
 from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi import (
@@ -6,7 +6,6 @@ from fastapi import (
     Depends,
     HTTPException,
     Request,
-    Body,
     Query,
     BackgroundTasks
 )
@@ -15,7 +14,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import (
     select,
     desc,
-    case
+    func
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -26,7 +25,6 @@ from models import (
     RequestStatus,
     User,
     UserSearchHistory,
-    RoleMaster,
 )
 from database import get_db, AsyncSessionLocal
 from auth_utils import decode_access_token
@@ -55,18 +53,13 @@ from youtube_api import (
     song_from_youtube_video,
 )
 
-from websocket_manager import broadcast_song_request, broadcast_message
-
 from schemas import (
     SongMixRequest,
     Track,
-    SongRequestResponse,
     AllSongResponseWrapper,
     SongRequestSimplifiedResponse,
-    StatusUpdateSchema
 )
 
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -92,23 +85,28 @@ VALID_MIXERS = {
     "without-mixing"
 }
 
-async def _notify_clients(message: dict):
-    """Best-effort realtime push; never let a dead socket break an API call."""
-    try:
-        await broadcast_message(message)
-    except Exception as e:
-        logger.warning("WebSocket broadcast failed: %s", e)
+# Minimum characters before the YouTube provider is queried (see search_song).
+MIN_SEARCH_LENGTH = 2
 
+# Neutral seeds for the home "Recommended" rail. These deliberately do NOT use
+# the user's search history, so a previous search can never reappear as a fresh
+# result when the app is reopened.
+SUGGESTED_SEEDS = (
+    "trending music",
+    "top hits",
+    "popular songs",
+    "new music friday",
+)
 
-async def _get_user(db: AsyncSession, userName: str, roleName: str):
+async def _get_user(db: AsyncSession, userName: str):
     stmt = (
         select(User)
-        .join(RoleMaster, User.roleId == RoleMaster.id)
         .options(joinedload(User.roleObj))
-        .where(User.userName == userName, RoleMaster.roleName == roleName)
+        .where(User.userName == userName)
+        .order_by(User.id.desc())
     )
     result = await db.execute(stmt)
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 def sanitize_filename(title: str) -> str:
     title = emoji.replace_emoji(title, replace='')
@@ -182,7 +180,7 @@ async def download_and_mix(
     if not user_data:
         raise HTTPException(401, "Invalid token")
 
-    user = await _get_user(db, user_data["sub"], user_data["role"])
+    user = await _get_user(db, user_data["sub"])
     if not user:
         raise HTTPException(404, "User not found")
 
@@ -299,19 +297,20 @@ async def download_and_mix(
     await db.commit()
     await db.refresh(new_req)
 
-    try:
-        await broadcast_song_request(new_req)
-    except Exception as e:
-        logger.warning("WebSocket broadcast failed: %s", e)
-
     final_filename = f"request_{new_req.id}_{selected_mixer}.mp3"
     final_path = os.path.join(MIXED_AUDIO_FOLDER, final_filename)
 
-    await _process_mixing_async(new_req.id, selected_mixer, audio_paths, final_path)
+    # Mixing (download/ffmpeg) is slow, so run it in the background. The request
+    # is returned immediately as "pending"; the client polls /allSongs until the
+    # status becomes "completed" (or "failed").
+    background_tasks.add_task(
+        _process_mixing_async, new_req.id, selected_mixer, audio_paths, final_path
+    )
 
     return {
         "requestId": new_req.id,
-        "message": f"Mix completed with '{selected_mixer}' mode.",
+        "message": f"Mix queued with '{selected_mixer}' mode.",
+        "status": RequestStatus.PENDING.value,
         "mixedAudioUrl": f"{PUBLIC_API_BASE}/requests/audio/byRequestId/{new_req.id}",
         "tracks": song_infos
 
@@ -338,14 +337,14 @@ async def _process_mixing_async(request_id, mixer, audio_paths, final_path):
                 req.mixedAudioData = f.read()
 
             req.mixedAudioPath = os.path.basename(final_path)
-            req.status = RequestStatus.PENDING
+            req.status = RequestStatus.COMPLETED
 
             await session.flush()
             await session.commit()
             await session.refresh(req)
 
         logger.info(f"Mix saved for request {request_id}")
-        logger.info(f"🚀 /mixed Audio takes {time.time() - start_time:.2f}s")
+        logger.info(f"ðŸš€ /mixed Audio takes {time.time() - start_time:.2f}s")
 
     except Exception as e:
         logger.error(f"Mixing failed: {e}")
@@ -354,17 +353,20 @@ async def _process_mixing_async(request_id, mixer, audio_paths, final_path):
             r = await session.execute(stmt)
             req = r.scalar_one_or_none()
             if req:
-                req.status = RequestStatus.REJECTED
+                req.status = RequestStatus.FAILED
                 await session.commit()
 
-def _authorize_media_request(request: Request, token: Optional[str]) -> None:
+def _authorize_media_request(request: Request, token: Optional[str]) -> int:
+    """Return the authenticated userId, or raise 401."""
     candidate = (
         token
         or request.headers.get("Authorization", "").replace("Bearer ", "")
         or request.query_params.get("token")
     )
-    if not candidate or not decode_access_token(candidate):
+    payload = decode_access_token(candidate) if candidate else None
+    if not payload or not payload.get("userId"):
         raise HTTPException(401, "Unauthorized")
+    return payload["userId"]
 
 
 @song_request_router.get("/audio/byRequestId/{request_id}")
@@ -376,12 +378,14 @@ async def download_mixed_audio_by_request(
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    _authorize_media_request(request, token)
+    user_id = _authorize_media_request(request, token)
 
     result = await db.execute(select(SongRequest).where(SongRequest.id == request_id))
     song_request = result.scalar_one_or_none()
     if not song_request or not song_request.mixedAudioPath:
         raise HTTPException(404, "Mixed audio is not ready yet")
+    if song_request.requesterId != user_id:
+        raise HTTPException(403, "You can only play your own mixes")
 
     safe_name = os.path.basename(song_request.mixedAudioPath)
     folder = os.path.abspath(MIXED_AUDIO_FOLDER)
@@ -403,8 +407,9 @@ async def download_mixed_audio(
     token: Optional[str] = Query(
         None, description="JWT access token (alternative to the Authorization header)"
     ),
+    db: AsyncSession = Depends(get_db),
 ):
-    _authorize_media_request(request, token)
+    user_id = _authorize_media_request(request, token)
 
     # Reject anything that escapes the mixed-audio folder (path traversal)
     safe_name = os.path.basename(filename)
@@ -417,6 +422,16 @@ async def download_mixed_audio(
         or not os.path.isfile(file_path)
     ):
         raise HTTPException(404, "File not found")
+
+    # Enforce ownership: the filename encodes the request id (request_<id>_...).
+    match = re.match(r"request_(\d+)_", safe_name)
+    if match:
+        owner = await db.execute(
+            select(SongRequest.requesterId).where(SongRequest.id == int(match.group(1)))
+        )
+        owner_id = owner.scalar_one_or_none()
+        if owner_id is not None and owner_id != user_id:
+            raise HTTPException(403, "You can only play your own mixes")
 
     return FileResponse(
         path=file_path, media_type="audio/mpeg", filename=safe_name
@@ -433,15 +448,56 @@ async def search_song(
     if not user_data:
         raise HTTPException(401, "Invalid token")
 
-    results = await search_youtube_videos(q, limit=10)
+    # A blank or one-character query makes the YouTube provider fall back to an
+    # arbitrary popular list, which looks like stale/incorrect results. Reject
+    # it explicitly so the client can distinguish "too short" from "no results".
+    query = (q or "").strip()
+    if len(query) < MIN_SEARCH_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Enter at least {MIN_SEARCH_LENGTH} characters to search.",
+        )
+
+    results = await search_youtube_videos(query, limit=10)
     await db.execute(
         insert(UserSearchHistory).values(
             userId=user_data["userId"],
-            queryText=q,
+            queryText=query,
         )
     )
     await db.commit()
-    return {"results": results}
+    return {"query": query, "results": results}
+
+
+@song_request_router.get("/searchHistory")
+async def get_search_history(
+    limit: int = Query(10, ge=1, le=50),
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+):
+    """The authenticated user's genuine recent searches, newest first.
+
+    Powers the clearly-labelled "Recent searches" section only; it is never
+    used to seed the home/suggestions list.
+    """
+    user_data = decode_access_token(token)
+    if not user_data:
+        raise HTTPException(401, "Invalid or expired token")
+
+    user = await _get_user(db, user_data["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    latest = func.max(UserSearchHistory.timestamp).label("latest")
+    result = await db.execute(
+        select(UserSearchHistory.queryText, latest)
+        .where(UserSearchHistory.userId == user.id)
+        .group_by(UserSearchHistory.queryText)
+        .order_by(desc(latest))
+        .limit(limit)
+    )
+    queries = [row[0] for row in result.fetchall() if row and row[0]]
+    return {"queries": queries}
 
 def clean_and_shorten(title: str, word_limit: int = 2) -> str:
     title = emoji.replace_emoji(title, replace="")
@@ -452,8 +508,6 @@ def clean_and_shorten(title: str, word_limit: int = 2) -> str:
 
 @song_request_router.get("/allSongs", response_model=AllSongResponseWrapper)
 async def get_all_song_requests(
-    mineOnly: bool = Query(False),
-    status: Optional[str] = Query(None, description="Filter by status: pending, accepted, rejected, playing, played"),
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db)
 ):
@@ -463,47 +517,17 @@ async def get_all_song_requests(
     if not user_data:
         raise HTTPException(401, "Invalid or expired token")
 
-    user = await _get_user(db, user_data["sub"], user_data["role"])
+    user = await _get_user(db, user_data["sub"])
     if not user:
         raise HTTPException(404, "User not found")
 
-    role_name = user.roleObj.roleName if user.roleObj else None
-
-    query = select(SongRequest).options(joinedload(SongRequest.requester))
-
-    status_priority = case(
-        (SongRequest.status == RequestStatus.PENDING, 1),
-        else_=0
+    # Single-role app: a user may only ever see their own requests.
+    query = (
+        select(SongRequest)
+        .options(joinedload(SongRequest.requester))
+        .where(SongRequest.requesterId == user.id)
+        .order_by(desc(SongRequest.createdAt))
     )
-
-    if status and role_name == "dj":
-        try:
-            status_enum = RequestStatus(status.lower())
-            query = query.where(SongRequest.status == status_enum)
-        except ValueError:
-            raise HTTPException(400, "Invalid status filter")
-
-        if status_enum in [RequestStatus.PLAYED, RequestStatus.PLAYING]:
-            query = query.order_by(
-                status_priority.asc(),
-                desc(SongRequest.tipAmount),
-                desc(SongRequest.playedAt)
-            )
-        else:
-            query = query.order_by(
-                status_priority.asc(),
-                desc(SongRequest.tipAmount),
-                desc(SongRequest.createdAt)
-            )
-    else:
-        query = query.order_by(
-            status_priority.asc(),
-            desc(SongRequest.tipAmount),
-            desc(SongRequest.createdAt)
-        )
-
-    if mineOnly:
-        query = query.where(SongRequest.requesterId == user.id)
 
     result = await db.execute(query)
     song_requests = result.scalars().all()
@@ -547,7 +571,7 @@ async def get_all_song_requests(
             ]
 
         mixed_audio_url = (
-            f"{PUBLIC_API_BASE}/requests/audio/{req.mixedAudioPath}"
+            f"{PUBLIC_API_BASE}/requests/audio/byRequestId/{req.id}"
             if req.mixedAudioPath else None
         )
 
@@ -568,11 +592,10 @@ async def get_all_song_requests(
                 requestedAt=req.createdAt.strftime('%Y-%m-%d %H:%M:%S') if req.createdAt else "",
                 playedAt=req.playedAt.strftime('%Y-%m-%d %H:%M:%S') if req.playedAt else None,
                 requestedSongs=requested_songs,
-                restaurantName=req.restaurantName or (req.requester.restaurantName if req.requester else None)
             )
         )
 
-    logger.info(f"🚀 /allSongs responded in {time.time() - start_time:.2f}s")
+    logger.info(f"ðŸš€ /allSongs responded in {time.time() - start_time:.2f}s")
 
     return AllSongResponseWrapper(data=final_responses)
 
@@ -600,7 +623,7 @@ async def get_video_info_for_multiple_ids(
     ]
 
     duration = time.time() - start_time
-    logger.info(f"🚀 /videosInfo completed in {duration:.2f} seconds")
+    logger.info(f"ðŸš€ /videosInfo completed in {duration:.2f} seconds")
 
     return {"results": results}
 
@@ -613,109 +636,14 @@ async def get_suggested_songs(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = await _get_user(db, user_data["sub"], user_data["role"])
+    user = await _get_user(db, user_data["sub"])
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Collect past queries or requests
-    search_result = await db.execute(
-        select(UserSearchHistory.queryText).where(UserSearchHistory.userId == user.id)
-    )
-    search_terms = [r[0] for r in search_result.fetchall()]
-
-    keyword = search_terms[-1] if search_terms else "trending music"
+    # Intentionally independent of the user's search history: otherwise the last
+    # search reappears as a "fresh" list every time the app restarts.
+    keyword = random.choice(SUGGESTED_SEEDS)
 
     tracks = await search_youtube_videos(keyword, limit=10)
-    return {"results": tracks}
+    return {"seed": keyword, "results": tracks}
 
-
-@song_request_router.put("/accept/{request_id}")
-async def accept_song_request(
-    request_id: int,
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db)
-):
-    user_data = decode_access_token(token)
-    if not user_data or user_data["role"] not in ["dj", "admin"]:
-        raise HTTPException(status_code=403, detail="Only DJ or Admin can accept song requests")
-
-    result = await db.execute(select(SongRequest).where(SongRequest.id == request_id))
-    request_obj = result.scalar_one_or_none()
-    if not request_obj:
-        raise HTTPException(status_code=404, detail="Song request not found")
-
-    request_obj.status = RequestStatus.ACCEPTED
-    await db.commit()
-    await _notify_clients({"action": "status_update", "data": {"songRequestId": request_id, "status": RequestStatus.ACCEPTED.value}})
-    return {"status": "success", "message": f"Song request {request_id} accepted"}
-
-
-@song_request_router.put("/reject/{request_id}")
-async def reject_song_request(
-    request_id: int,
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db)
-):
-    user_data = decode_access_token(token)
-    if not user_data or user_data["role"] not in ["dj", "admin"]:
-        raise HTTPException(status_code=403, detail="Only DJ or Admin can reject song requests")
-
-    result = await db.execute(select(SongRequest).where(SongRequest.id == request_id))
-    request_obj = result.scalar_one_or_none()
-    if not request_obj:
-        raise HTTPException(status_code=404, detail="Song request not found")
-
-    request_obj.status = RequestStatus.REJECTED
-    await db.commit()
-    await _notify_clients({"action": "status_update", "data": {"songRequestId": request_id, "status": RequestStatus.REJECTED.value}})
-    return {"status": "success", "message": f"Song request {request_id} rejected"}
-
-
-@song_request_router.put("/updateStatus/{request_id}", response_model=SongRequestResponse)
-async def update_song_status(
-    request_id: int,
-    status_data: StatusUpdateSchema,
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db)
-):
-    user_data = decode_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    if user_data.get("role") not in ["dj", "admin"]:
-        raise HTTPException(status_code=403, detail="Only DJ or Admin can update song status")
-
-    result = await db.execute(select(SongRequest).where(SongRequest.id == request_id))
-    song_request = result.scalar_one_or_none()
-
-    if not song_request:
-        raise HTTPException(status_code=404, detail="Song request not found")
-
-    if status_data.status in [RequestStatus.PLAYING, RequestStatus.PLAYED]:
-        song_request.playedAt = datetime.now(timezone.utc)
-
-    old_status = song_request.status
-    song_request.status = status_data.status
-    await db.commit()
-    await db.refresh(song_request)
-
-    await _notify_clients({
-        "action": "status_update",
-        "data": {
-            "songRequestId": request_id,
-            "status": status_data.status.value,
-            "previousStatus": old_status.value if old_status else None
-        }
-    })
-
-    logger.info(f"🎧 Updated song request {request_id} from {old_status} → {status_data.status}")
-
-    return SongRequestResponse(
-        id=song_request.id,
-        songName=song_request.songName,
-        songName2=song_request.songName2,
-        status=song_request.status,
-        mixedAudioUrl=f"{PUBLIC_API_BASE}/requests/audio/{os.path.basename(song_request.mixedAudioPath)}"
-        if song_request.mixedAudioPath else None,
-        tipAmount=song_request.tipAmount
-    )

@@ -47,21 +47,9 @@ void main() {
 
     expect(session.isReady, isTrue);
     expect(session.isAuthenticated, isFalse);
-    expect(find.text('DJ App'), findsOneWidget);
+    expect(find.text('Music Mixer'), findsOneWidget);
     expect(find.text('Sign in'), findsOneWidget);
     expect(find.text('Email or phone'), findsOneWidget);
     expect(find.text('Password'), findsOneWidget);
-  });
-
-  testWidgets('the listener/DJ role toggle is selectable', (tester) async {
-    final session = Session(store: _EmptyStore());
-    await session.restore();
-    await tester.pumpWidget(_appWith(session));
-    await tester.pump();
-
-    expect(find.text('Listener'), findsOneWidget);
-    await tester.tap(find.text('DJ'));
-    await tester.pump();
-    expect(find.text('DJ'), findsWidgets);
   });
 }

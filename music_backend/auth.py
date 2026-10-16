@@ -29,16 +29,19 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 @auth_router.post("/signup")
 async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     start_time = time.time()
+    # Single-role application: every new account is an ordinary user. Any role
+    # sent by an older client is ignored (the field is optional now).
+    role_name = "user"
     try:
         logger.info("📥 Signup request received for userName: %s", user_data.userName)
 
         role_result = await db.execute(
-            select(RoleMaster).where(RoleMaster.roleName == user_data.role)
+            select(RoleMaster).where(RoleMaster.roleName == role_name)
         )
         role_obj = role_result.scalars().first()
 
         if not role_obj:
-            return format_response(400, "Invalid role specified", {"role": user_data.role})
+            return format_response(400, "Signup is unavailable: user role not configured", {"role": role_name})
 
         role_id = role_obj.id
 
@@ -46,20 +49,20 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
             select(User).filter(User.userName == user_data.userName, User.roleId == role_id)
         )
         if result.scalars().first():
-            return format_response(400, "User already registered for this role", {"userName": user_data.userName, "role": user_data.role})
+            return format_response(400, "User already registered", {"userName": user_data.userName})
 
         result = await db.execute(
             select(User).filter(User.phone == user_data.phone, User.roleId == role_id)
         )
         if result.scalars().first():
-            return format_response(400, "Phone number already registered for this role", {"phone": user_data.phone, "role": user_data.role})
+            return format_response(400, "Phone number already registered", {"phone": user_data.phone})
 
         if user_data.email:
             result = await db.execute(
                 select(User).filter(func.lower(User.email) == func.lower(user_data.email), User.roleId == role_id)
             )
             if result.scalars().first():
-                return format_response(400, "Email already registered for this role", {"email": user_data.email, "role": user_data.role})
+                return format_response(400, "Email already registered", {"email": user_data.email})
 
         new_user = User(
             userName=user_data.userName,
@@ -67,14 +70,13 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
             phone=user_data.phone,
             password=hash_password(user_data.password),
             roleId=role_id,
-            restaurantName=user_data.restaurantName
         )
 
         db.add(new_user)
         await db.commit()
         await db.refresh(new_user)
 
-        access_token = create_access_token({"sub": new_user.userName, "role": user_data.role, "userId": new_user.id})
+        access_token = create_access_token({"sub": new_user.userName, "role": role_name, "userId": new_user.id})
 
         return format_response(
             200,
@@ -85,8 +87,7 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
                 phone=new_user.phone,
                 email=new_user.email,
                 roleId=new_user.roleId,
-                role=user_data.role,
-                restaurantName=new_user.restaurantName
+                role=role_name,
             ).dict()
         )
 
@@ -105,28 +106,34 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     try:
         logger.info("📥 Login request received for identifier: %s", user_data.identifier)
 
+        filters = [
+            or_(
+                func.lower(User.email) == func.lower(user_data.identifier),
+                User.phone == user_data.identifier
+            )
+        ]
+        # Role is optional in the single-role app. If a legacy client still
+        # sends one, honour it; otherwise match any role (newest account wins).
+        if user_data.role:
+            filters.append(RoleMaster.roleName == user_data.role)
+
         stmt = (
             select(User, RoleMaster)
             .join(RoleMaster, User.roleId == RoleMaster.id)
-            .filter(
-                or_(
-                    func.lower(User.email) == func.lower(user_data.identifier),
-                    User.phone == user_data.identifier
-                ),
-                RoleMaster.roleName == user_data.role
-            )
+            .filter(*filters)
+            .order_by(User.id.desc())
         )
 
         result = await db.execute(stmt)
         user_with_role = result.first()
 
         if not user_with_role:
-            return format_response(404, "User not found for this role", {"identifier": user_data.identifier, "role": user_data.role})
+            return format_response(404, "User not found", {"identifier": user_data.identifier})
 
         user, role = user_with_role
 
         if not verify_password(user_data.password, user.password):
-            return format_response(401, "Invalid credentials", {"identifier": user_data.identifier, "role": user_data.role})
+            return format_response(401, "Invalid credentials", {"identifier": user_data.identifier})
 
         token_data = {
             "sub": user.userName,
@@ -161,7 +168,6 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
                 phone=user.phone,
                 email=user.email,
                 role=role.roleName,
-                restaurantName=user.restaurantName
             ).dict()
         )
 

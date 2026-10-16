@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../src/models.dart';
 import '../src/session.dart';
-import '../widgets.dart';
+import '../theme/app_theme.dart';
+import '../widgets/feedback.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -18,8 +18,6 @@ class _SignupScreenState extends State<SignupScreen> {
   final _email = TextEditingController();
   final _phone = TextEditingController();
   final _password = TextEditingController();
-  final _restaurant = TextEditingController();
-  UserRole _role = UserRole.user;
   bool _busy = false;
   bool _obscure = true;
 
@@ -29,7 +27,6 @@ class _SignupScreenState extends State<SignupScreen> {
     _email.dispose();
     _phone.dispose();
     _password.dispose();
-    _restaurant.dispose();
     super.dispose();
   }
 
@@ -43,8 +40,6 @@ class _SignupScreenState extends State<SignupScreen> {
         email: _email.text.trim(),
         password: _password.text,
         phone: _phone.text.trim(),
-        role: _role.name,
-        restaurantName: _restaurant.text.trim(),
       );
       if (!mounted) return;
       showInfo(context, 'Account created - sign in with your email or phone');
@@ -64,38 +59,41 @@ class _SignupScreenState extends State<SignupScreen> {
       appBar: AppBar(title: const Text('Create account')),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
+              constraints: const BoxConstraints(maxWidth: 440),
               child: Form(
                 key: _formKey,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text('Join the party',
-                        style: theme.textTheme.headlineSmall
-                            ?.copyWith(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 20),
+                    Text('Create your account',
+                        style: theme.textTheme.headlineSmall),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Sign up to search songs, build mixes and play them.',
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(color: AppColors.textSecondary),
+                    ),
+                    const SizedBox(height: AppSpacing.lg),
                     TextFormField(
                       controller: _userName,
                       decoration: const InputDecoration(
                         labelText: 'Username',
                         prefixIcon: Icon(Icons.badge_outlined),
-                        border: OutlineInputBorder(),
                       ),
                       validator: (v) => (v == null || v.trim().length < 3)
                           ? 'Username must be at least 3 characters'
                           : null,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppSpacing.md),
                     TextFormField(
                       controller: _email,
                       keyboardType: TextInputType.emailAddress,
                       decoration: const InputDecoration(
                         labelText: 'Email (optional)',
                         prefixIcon: Icon(Icons.mail_outline),
-                        border: OutlineInputBorder(),
                       ),
                       validator: (v) {
                         final value = v?.trim() ?? '';
@@ -105,14 +103,13 @@ class _SignupScreenState extends State<SignupScreen> {
                         return ok ? null : 'Enter a valid email';
                       },
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppSpacing.md),
                     TextFormField(
                       controller: _phone,
                       keyboardType: TextInputType.phone,
                       decoration: const InputDecoration(
                         labelText: 'Phone',
                         prefixIcon: Icon(Icons.phone_outlined),
-                        border: OutlineInputBorder(),
                       ),
                       validator: (v) {
                         final value = v?.trim() ?? '';
@@ -123,14 +120,13 @@ class _SignupScreenState extends State<SignupScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppSpacing.md),
                     TextFormField(
                       controller: _password,
                       obscureText: _obscure,
                       decoration: InputDecoration(
                         labelText: 'Password',
                         prefixIcon: const Icon(Icons.lock_outline),
-                        border: const OutlineInputBorder(),
                         suffixIcon: IconButton(
                           icon: Icon(_obscure
                               ? Icons.visibility_outlined
@@ -142,33 +138,7 @@ class _SignupScreenState extends State<SignupScreen> {
                           ? 'Password must be at least 6 characters'
                           : null,
                     ),
-                    const SizedBox(height: 16),
-                    TextFormField(
-                      controller: _restaurant,
-                      decoration: const InputDecoration(
-                        labelText: 'Restaurant / venue (optional)',
-                        prefixIcon: Icon(Icons.storefront_outlined),
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    SegmentedButton<UserRole>(
-                      segments: const [
-                        ButtonSegment(
-                          value: UserRole.user,
-                          label: Text('Listener'),
-                          icon: Icon(Icons.headphones),
-                        ),
-                        ButtonSegment(
-                          value: UserRole.dj,
-                          label: Text('DJ'),
-                          icon: Icon(Icons.equalizer),
-                        ),
-                      ],
-                      selected: {_role},
-                      onSelectionChanged: (s) => setState(() => _role = s.first),
-                    ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: AppSpacing.lg),
                     FilledButton(
                       onPressed: _busy ? null : _submit,
                       child: _busy

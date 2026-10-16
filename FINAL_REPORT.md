@@ -1,52 +1,101 @@
-# Final Report — DJ App (Phases 1–19)
+# Final Report — Music Mixer (single-role refactor)
 
-Date: 2026-10-08 · Machine: Windows 11 (non-admin), Python 3.12.10, PostgreSQL 17.11 (portable), Flutter 3.47.6 / Dart 3.13.5
+Date: 2026-10-12 · Machine: Windows 11 (non-admin), Python 3.12.10, PostgreSQL 17.11 (portable), Flutter 3.47.7 / Dart 3.13.5
 
-## Status board
+## Objective
 
-| Phase | Deliverable | Status |
-|------:|-------------|--------|
-| 1 | Read-only architecture analysis | ✅ |
-| 2 | Python 3.12 + virtualenv + pinned `requirements.txt` | ✅ |
-| 3 | PostgreSQL 17 installed/started, `djapp` role + `djapp_db`, `.env` | ✅ |
-| 4 | `database.py` / `models.py` rewritten (8 tables, 12 indexes) | ✅ |
-| 5 | Alembic init + baseline migration + role seed (round-trip verified) | ✅ |
-| 6 | FastAPI fixes (folders, async search, WS manager, lifespan, CORS, UTF-8) | ✅ |
-| 7 | Backend E2E smoke suite — **29/29 passed, 0 skipped** | ✅ |
-| 8 | Flutter SDK installed, `flutter doctor` | ✅ |
-| 9 | `flutter create` (android, windows, web) | ✅ |
-| 10 | Flutter config/models/api-client/session/token-store | ✅ |
-| 11 | Screens: login, signup, listener home (search + my requests), DJ dashboard | ✅ |
-| 12 | WebSocket live queue + audio playback layers | ✅ |
-| 13 | `flutter analyze` → **0 issues** | ✅ |
-| 14 | `flutter test` → **16/16 passed** (unit + widget + live integration) | ✅ |
-| 15 | `flutter build windows --debug` ✔ and `flutter build web --release` ✔, exe boot-tested against live API | ✅ |
-| 16 | Security review — 2 findings fixed, 5 documented | ✅ |
-| 17 | Cleanup (temp files, broken venv, git hygiene, `.gitignore`) | ✅ |
-| 18 | `README.md` with exact commands | ✅ |
-| 19 | This report | ✅ |
+Convert the previous DJ/Listener app into a simplified **single-role** music
+mixing app (login → search → select → mix → My Requests → play completed mix)
+and remove DJ-role functionality (accept/reject, live DJ queue, WebSocket) and
+restaurant concepts from the real architecture — backend routes/models/auth,
+database behaviour and the Flutter client — not just the UI. Existing user data
+is preserved; all changes are backward-compatible and require **no migration**.
 
 ---
 
-## Key environment decisions (and why)
+## Status board
 
-1. **SQLAlchemy pinned to 2.0.41** — Smart App Control (enforcement mode) blocks the
-   unsigned `_immutabledict_cy.pyd` in SQLAlchemy ≥ 2.1. The app crashes on import
-   otherwise.
-2. **PostgreSQL started through WMI** (`Win32_Process.Create`) — backends die with
-   `0xC0000142` when launched inside the terminal's restricted Job Object.
-   `scripts/start_postgres.ps1` does this.
-3. **The script's readiness probe is a plain TCP check** — the previous `psql -U postgres`
-   probe hung forever (superuser has no password → interactive prompt). Fixed during
-   Phase 17 testing.
-4. **Schema is owned by Alembic** — startup only *verifies* tables and prints
-   `alembic upgrade head` as a hint; `create_all` was removed.
-5. **Flutter uses pure-Dart packages only** — Developer Mode is off and the account is
-   non-admin, so symlinks are impossible; native plugins cannot compile. Storage and
-   playback use `dart:io` / `package:web`. Enabling Developer Mode later unlocks
-   `shared_preferences`, `just_audio`, Android builds, etc.
-6. **UTF-8 stdout reconfigure at import time in `main.py`** — Windows consoles default
-   to cp1252 and the app logs emoji (`UnicodeEncodeError` crashes otherwise).
+| Area | Deliverable | Status |
+|-----:|-------------|--------|
+| Backend | Models/schemas drop restaurant; single `user` role enforced at signup | ✅ |
+| Backend | Auth ignores/normalises `role`; login works without a role | ✅ |
+| Backend | Removed DJ endpoints (`accept`/`reject`/`updateStatus`) and `/ws/dj` + `websocket_manager.py` | ✅ |
+| Backend | Owner-scoped `/requests/allSongs` and media endpoints (403/401) | ✅ |
+| Backend | Background mix lifecycle `pending → completed \| failed` | ✅ |
+| Backend tests | `pytest music_backend/tests` → **19 passed** | ✅ |
+| Backend E2E | `scripts/smoke_test.py` → **35 passed / 0 failed / 0 skipped** | ✅ |
+| Flutter | Removed DJ screens/controller/socket; renamed listener → user | ✅ |
+| Flutter | Mix tray, My Requests (polling), play gating, Retry on failure | ✅ |
+| Flutter | `flutter analyze` → **0 issues** | ✅ |
+| Flutter tests | `flutter test` → **24 passed** (live tests skip offline) | ✅ |
+| Docs | `README.md` + this report updated | ✅ |
+
+---
+
+## What changed
+
+### Backend
+
+* `models.py` — removed `Restaurant`; `RoleMaster` no longer references a
+  restaurant; `User` and `SongRequest` dropped restaurant columns.
+* `schemas.py` — `role` optional on `UserCreate`/`UserLogin`; removed restaurant
+  fields and the DJ-only `StatusEnum` / `StatusUpdateSchema` / `SongRequestResponse`.
+* `auth.py` — signup forces the `user` role (duplicate checks scoped to it);
+  login filters by role only when supplied, otherwise matches any role.
+* `song_requests.py` — removed WebSocket notifications; `requestSong` queues the
+  background mix and returns `{requestId, message, status: 'pending',
+  mixedAudioUrl, tracks}`; `_process_mixing_async` sets `COMPLETED`/`FAILED`;
+  `allSongs` is scoped to the caller; both audio endpoints enforce ownership
+  (403 for other users, 401 without a token); removed DJ endpoints.
+* `user.py` — profile drops restaurant, adds `phone`.
+* `main.py` — removed `/ws/dj` and its imports.
+* `websocket_manager.py` — deleted.
+
+### Flutter
+
+* Deleted `screens/dj/`, `src/dj_queue_controller.dart`, `src/live_queue.dart`;
+  renamed `screens/listener/` → `screens/user/` (`UserShell`, `UserHomeScreen`).
+* `src/models.dart` / `src/session.dart` — removed `UserRole`, `parseRole`,
+  `role`, `restaurantName`, `isDj`; `signUp`/`login` no longer take a role.
+* `src/song_api.dart` — `all()` (owner-scoped) replaces `all({mineOnly,status})`;
+  removed `accept`/`reject`/`updateStatus`.
+* `screens/user/`, `profile`, `login`, `signup` — removed role selectors and the
+  restaurant field; updated copy/branding to "Music Mixer".
+* `widgets/request_card.dart` / `theme/app_theme.dart` — lifecycle timeline
+  Submitted → Mixing → Ready; playback only for completed/ready; Retry action.
+* `pubspec.yaml` — removed `web_socket_channel` (pure-Dart deps only: `http`,
+  `provider`, `web`).
+
+### Database
+
+* No new migration. `requeststatus` already supports `completed`/`failed`. The
+  `role_master` rows and restaurant columns remain in the schema for
+  backward compatibility with existing data.
+
+---
+
+## Verification results
+
+| Check | Result |
+|-------|--------|
+| `pytest music_backend/tests -q` | **19 passed** |
+| `scripts/smoke_test.py` | **35 passed / 0 failed / 0 skipped** — single-role auth, duplicate rejected, profile without restaurant, removed DJ surface (404), YouTube search contract, `pending → completed` with `mixedAudioUrl`, owner 200 / other-user 403 / no-token 401, owner-scoped `allSongs`, traversal → 404 |
+| `flutter analyze` | **No issues found!** |
+| `flutter test` | **24/24 passed** — models, envelope, widget (splash + login), search view-model, and live integration (skips when API is offline) |
+
+---
+
+## Key environment decisions (unchanged)
+
+1. **SQLAlchemy pinned to 2.0.41** — Smart App Control blocks the native
+   `_immutabledict_cy.pyd` in SQLAlchemy ≥ 2.1.
+2. **PostgreSQL started via WMI** (`scripts/start_postgres.ps1`) — avoids the
+   terminal Job Object crash (`0xC0000142`); readiness probe is a plain TCP check.
+3. **Schema owned by Alembic** — startup only verifies tables.
+4. **Flutter uses pure-Dart packages only** — Developer Mode is off and the
+   account is non-admin, so native plugins cannot compile. Playback is delegated
+   externally (Play on YouTube / play mix URL); the app never fakes playback.
+5. **UTF-8 stdout reconfigure in `main.py`** — Windows consoles default to cp1252.
 
 ---
 
@@ -61,14 +110,16 @@ py -3.12 -m venv .venv
 
 # database
 powershell -ExecutionPolicy Bypass -File scripts\start_postgres.ps1
-.\.venv\Scripts\alembic.exe upgrade head          # 2 revisions → head d66802f3171b
-.\.venv\Scripts\alembic.exe current               # d66802f3171b (head)
+.\.venv\Scripts\alembic.exe upgrade head
+
+# unit tests
+.\.venv\Scripts\python.exe -m pytest music_backend/tests -q
 
 # run API (from music_backend/, flat imports)
 cd music_backend
 ..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8085
 
-# end-to-end test suite (starts/stops its own server)
+# end-to-end suite (starts/stops its own server)
 cd ..
 .\.venv\Scripts\python.exe scripts\smoke_test.py
 ```
@@ -79,87 +130,20 @@ cd ..
 cd dj_app
 flutter pub get
 flutter analyze                 # No issues found!
-flutter test                    # All tests passed! (16)
-flutter build windows --debug   # build\windows\x64\runner\Debug\dj_app.exe
-flutter build web --release     # build\web
-flutter run -d windows          # dev run; API base via --dart-define=API_BASE=...
+flutter test                    # All tests passed! (24)
+flutter run -d windows          # API base via --dart-define=API_BASE=...
 ```
 
 ---
 
-## Verification results
+## Known limitations / notes
 
-| Check | Result |
-|-------|--------|
-| Alembic `upgrade → downgrade base → upgrade` round trip | 8 tables, 27 indexes, enum + 3 seeded roles, `alembic_version` correct |
-| `alembic current` | `d66802f3171b (head)` |
-| API startup | `✅ Database connected, schema OK (managed by Alembic)`, 15 routes, docs at `/docs` |
-| Smoke suite | **29 passed / 0 failed / 0 skipped** — auth (signup, duplicate, login, bad password, profile, refresh, protected, invalid token), live Audius search + suggestions, request lifecycle with background mixing → `mixedAudioUrl`, audio 200 with token / 401 without, queue + role guard 403, accept / updateStatus playing / played / reject / unknown-id 404, traversal `..%5C..%5C.env` → 404, **unauthenticated `/ws/dj` rejected**, authenticated accepted |
-| `flutter analyze` | **No issues found!** |
-| `flutter test` | **16/16 passed** — model parsing, envelope, role parsing, widget tests (splash, login, role toggle), plus live integration (real signup → failed login → login → empty queue → Audius search through the Dart client; skips itself when the API is offline) |
-| `flutter build windows --debug` | built in 11–13 s |
-| `flutter build web --release` | built in ~40 s (fonts tree-shaken) |
-| Executable boot test | launched `dj_app.exe` against the live API → stayed alive 10 s, 329 MB RSS, no crash |
-| Security re-check after fixes | `GET /audio/` → **404** (static mount removed), anon WS → **rejected** |
-
----
-
-## Security review (Phase 16)
-
-**Fixed**
-
-1. **Unauthenticated static media mount** — `app.mount("/audio", StaticFiles(...))` served
-   every mixed file anonymously, bypassing the token check on
-   `/requests/audio/{filename}`. Mount removed; media is reachable only with a Bearer
-   token or `?token=`.
-2. **Unauthenticated `/ws/dj`** — the socket broadcast requester names, tips and song
-   titles. It now requires `?token=<access JWT>` (validated with `decode_access_token`);
-   the Flutter `LiveQueue` sends the current token on every (re)connect. Covered by two
-   new smoke checks.
-
-**Documented / accepted**
-
-* `SECRET_KEY` falls back to `"mysecret"` with a loud warning — make it fatal before a
-  production deploy.
-* Access JWTs live 12 h, refresh 90 days with `jti`/`iat`.
-* Session persistence is plaintext: `%APPDATA%\.dj_app\session.json` (Windows) /
-  `localStorage` (web). Encrypted storage needs a native plugin → possible after
-  Developer Mode is enabled.
-* CORS is `*` with `allow_credentials=False` (Bearer-only auth, explicit headers).
-* `uvicorn ... --host 0.0.0.0` in `main.py`'s `__main__` block — run through
-  `127.0.0.1` (as all commands here do) unless LAN access is wanted.
-* DB is non-superuser `djapp`, scram-sha-256, bound to `127.0.0.1`; PostgreSQL data dir
-  is local to the user profile.
-* Path traversal, missing-file and missing-token cases all return 404/401.
-
----
-
-## Cleanup performed (Phase 17)
-
-* Deleted: `_phase5_check.py`, `server.log`, `boot_check.log`, stray 0-byte `outputs`
-  and `uploads` placeholder files.
-* Removed the broken **`env/`** virtualenv **from disk and from the git index**
-  (690 of the 708 tracked files were venv junk in the single existing commit).
-* Untracked `music_backend/cookies.txt` (yt-dlp cookie jar — visitor tokens only, but a
-  cookie jar does not belong in git).
-* Rewrote `.gitignore`: environments, `.env*`, logs, runtime media
-  (`audius_downloads/`, `uploads/`), cookie jar, build/test caches.
-
-`git status` now shows only the real work: modified backend files, new `alembic/`,
-`scripts/`, `dj_app/`, `README.md` — nothing has been committed (say the word and I'll
-stage and commit).
-
----
-
-## Known limitations / optional next steps
-
-1. **No Android build yet** — Flutter reports *no Android SDK*, and Developer Mode is
-   off. Enabling Developer Mode → install Android SDK → `flutter build apk`.
-2. **Plugin-based features are off-limits** right now (encrypted storage, audio
-   plugins) — same Developer Mode constraint; the current pure-Dart replacements work.
-3. **Audius track availability is external** — some tracks return `403`, which the API
-   now surfaces as a structured **400** (`These tracks are not available …`) instead of a
-   500. The smoke test retries automatically until it finds streamable pair.
-4. **Mixing is ffmpeg-only** (installed via winget); refresh `$env:Path` in any shell
-   opened before the install.
+1. **`requestSong` blocks on the first authorized-YouTube download** — the
+   download runs inline before the request is queued (pre-existing behavior;
+   covered by unit tests). Cached files make subsequent requests fast. The
+   background step then mixes and flips the status to terminal.
+2. **No realtime channel** — My Requests polls the owner-scoped endpoint, which
+   is sufficient for the single-role flow.
+3. **No Android build** — no Android SDK and Developer Mode is off.
+4. **Plugin-based features remain off-limits** (encrypted storage, audio plugins).
 5. Uncommitted work — ready to commit on request.

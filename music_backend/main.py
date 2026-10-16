@@ -12,11 +12,10 @@ for _stream in (sys.stdout, sys.stderr):
 # import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends,WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi import Query, Header
 import os
 # from sqlalchemy.ext.asyncio import AsyncSession
 # from database import get_db
@@ -25,15 +24,13 @@ from database import  async_engine, Base
 from user import user_router
 from song_requests import song_request_router 
 from audio_assets import audio_asset_router
-from websocket_manager import connected_clients
 from sqlalchemy import text 
 from database import AsyncSessionLocal
-from auth_utils import decode_access_token
 
 print("✅ FastAPI server is starting...") 
 
 REQUIRED_TABLES = (
-    "users", "role_master", "restaurants", "song_requests",
+    "users", "role_master", "song_requests",
     "cached_songs", "downloaded_audios", "refresh_tokens", "user_search_history",
     "audio_assets",
 )
@@ -81,23 +78,9 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
-# The queue feed carries requester names, tips and song titles, so the socket
-# is gated by the same JWT used for the REST API (?token=<access token>).
-@app.websocket("/ws/dj")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=None)):
-    if not token or not decode_access_token(token):
-        await websocket.close(code=1008, reason="Unauthorized")
-        return
-    await websocket.accept()
-    connected_clients.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text() 
-    except Exception:
-        pass
-    finally:
-        if websocket in connected_clients:
-            connected_clients.remove(websocket)
+# The queue feed carried requester names, tips and song titles for the DJ role.
+# The app is single-role now, so the realtime queue socket was removed;
+# clients poll /requests/allSongs (scoped to their own requests) instead.
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 

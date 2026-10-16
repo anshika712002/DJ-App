@@ -16,7 +16,7 @@ class UserProfile(BaseModel):
     userName: str
     email: str
     role: str | None = None
-    restaurantName: str | None = None
+    phone: str | None = None
 
 
 # ✅ Fetch user using userId from JWT
@@ -50,8 +50,7 @@ async def get_profile(token: str = Depends(oauth2_scheme), db: AsyncSession = De
         "userName": user.userName,
         "email": user.email,
         "role": roleName,
-        "phone": user.phone,
-        "restaurantName": user.restaurantName
+        "phone": user.phone
     })
 
 
@@ -77,7 +76,8 @@ async def update_profile(
 
     user.userName = updated_data.userName
     user.email = updated_data.email
-    user.restaurantName = updated_data.restaurantName
+    if updated_data.phone:
+        user.phone = updated_data.phone
 
     await db.commit()
     await db.refresh(user)
@@ -86,7 +86,7 @@ async def update_profile(
         "id": user.id,
         "userName": user.userName,
         "email": user.email,
-        "restaurantName": user.restaurantName
+        "phone": user.phone
     })
 
 

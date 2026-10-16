@@ -27,6 +27,12 @@ class _DbResult:
     def all(self):
         return self._values
 
+    def scalar_one_or_none(self):
+        return self._values[0] if self._values else None
+
+    def first(self):
+        return (self._values[0],) if self._values else None
+
 
 class _FakeDb:
     def __init__(self, assets=()):
@@ -54,7 +60,7 @@ def _request_app(monkeypatch, fake_db):
     async def get_fake_db():
         return fake_db
 
-    async def get_test_user(_db, _user_name, _role_name):
+    async def get_test_user(_db, _user_name):
         return SimpleNamespace(id=42, roleObj=None)
 
     async def no_op(*_args, **_kwargs):
@@ -64,7 +70,6 @@ def _request_app(monkeypatch, fake_db):
         "sub": "test-user", "role": "user", "userId": 42
     })
     monkeypatch.setattr(request_module, "_get_user", get_test_user)
-    monkeypatch.setattr(request_module, "broadcast_song_request", no_op)
     monkeypatch.setattr(request_module, "_process_mixing_async", no_op)
     app.dependency_overrides[request_module.get_db] = get_fake_db
     return app
@@ -274,3 +279,45 @@ def test_local_audio_mixer_exports_non_mp3_input_as_mp3(tmp_path):
 
     assert output.is_file()
     assert output.read_bytes()[:3] == b"ID3"
+
+
+def test_mixed_audio_by_request_id_rejects_other_users(monkeypatch):
+    song_request = SimpleNamespace(
+        id=5, requesterId=99, mixedAudioPath="request_5_overlay.mp3"
+    )
+    fake_db = _FakeDb([song_request])
+    app = FastAPI()
+    app.include_router(request_module.song_request_router, prefix="/requests")
+
+    async def get_fake_db():
+        return fake_db
+
+    monkeypatch.setattr(
+        request_module, "decode_access_token",
+        lambda _token: {"sub": "test-user", "role": "user", "userId": 42},
+    )
+    app.dependency_overrides[request_module.get_db] = get_fake_db
+
+    response = TestClient(app).get(
+        "/requests/audio/byRequestId/5", params={"token": "test-token"}
+    )
+
+    assert response.status_code == 403, response.text
+
+
+def test_mixed_audio_by_request_id_requires_token(monkeypatch):
+    fake_db = _FakeDb([])
+    app = FastAPI()
+    app.include_router(request_module.song_request_router, prefix="/requests")
+
+    async def get_fake_db():
+        return fake_db
+
+    monkeypatch.setattr(
+        request_module, "decode_access_token", lambda _token: None
+    )
+    app.dependency_overrides[request_module.get_db] = get_fake_db
+
+    response = TestClient(app).get("/requests/audio/byRequestId/5")
+
+    assert response.status_code == 401, response.text

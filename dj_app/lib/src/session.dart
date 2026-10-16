@@ -22,9 +22,7 @@ class Session extends ChangeNotifier {
   AuthSession? get current => _session;
   bool get isReady => _ready;
   bool get isAuthenticated => _session != null;
-  bool get isDj => _session?.userRole == UserRole.dj;
   String get userName => _session?.userName ?? '';
-  String? get role => _session?.role;
 
   Future<void> restore() async {
     try {
@@ -48,17 +46,12 @@ class Session extends ChangeNotifier {
     String? email,
     required String password,
     required String phone,
-    required String role,
-    String? restaurantName,
   }) async {
     final raw = await api.post('/auth/signup', body: {
       'userName': userName,
       if (email != null && email.isNotEmpty) 'email': email,
       'password': password,
       'phone': phone,
-      'role': role,
-      if (restaurantName != null && restaurantName.isNotEmpty)
-        'restaurantName': restaurantName,
     }, auth: false);
     final response = ApiResponse.fromJson(_asMap(raw));
     if (!response.isSuccess) {
@@ -70,12 +63,10 @@ class Session extends ChangeNotifier {
   Future<void> login({
     required String identifier,
     required String password,
-    required String role,
   }) async {
     final raw = await api.post('/auth/login', body: {
       'identifier': identifier,
       'password': password,
-      'role': role,
     }, auth: false);
     final response = ApiResponse.fromJson(_asMap(raw));
     if (!response.isSuccess || response.data is! Map) {

@@ -20,6 +20,8 @@ __pycache__/
 music_backend/audius_downloads/
 music_backend/audio_assets/
 music_backend/uploads/
+music_backend/youtube_downloads/
 uploads/
 outputs/
 music_backend/cookies.txt
+FINAL_REPORT_PHASE3.md

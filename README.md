@@ -1,17 +1,23 @@
-# DJ App
+# Music Mixer
 
-A full-stack song-request app: listeners discover YouTube playback results and
-request mixes from server-managed local or licensed audio assets. The DJ dashboard
-accepts/plays requests, and the backend mixes eligible audio in the background.
+A full-stack, single-role music app: users sign in, search songs, pick one or
+two tracks, submit a mix, then track and play the finished mix. The backend
+prepares each mix in the background and gates playback on real status.
 
-| Layer     | Tech |
-|-----------|------|
-| API       | FastAPI + Uvicorn (async) |
-| Database  | PostgreSQL 17, SQLAlchemy 2.0 (async), Alembic migrations |
-| Auth      | JWT access + refresh tokens, bcrypt password hashing |
-| Live feed | WebSockets (`/ws/dj`, JWT-gated) |
-| Client    | Flutter (Windows, Web, Android-ready) |
-| Media     | ffmpeg mixing (overlay / alternate / crossfade / tempo-sync / pitch-shift / beat-overlay / no-mix) |
+```text
+Login → Search → Select songs → Mix → My Requests → Play completed mix
+```
+
+There is no DJ role and no request accept/reject workflow. Every account is a
+plain **user**; the backend owns request status end-to-end.
+
+| Layer    | Tech |
+|----------|------|
+| API      | FastAPI + Uvicorn (async) |
+| Database | PostgreSQL 17, SQLAlchemy 2.0 (async), Alembic migrations |
+| Auth     | JWT access + refresh tokens, bcrypt password hashing |
+| Client   | Flutter (Windows, Web, Android-ready) |
+| Media    | ffmpeg mixing (overlay / alternate / crossfade / tempo-sync / pitch-shift / beat-overlay / no-mix) |
 
 ---
 
@@ -20,19 +26,19 @@ accepts/plays requests, and the backend mixes eligible audio in the background.
 ```
 DJ-App/
 ├── music_backend/          FastAPI application
-│   ├── main.py             app factory, lifespan, CORS, websocket
+│   ├── main.py             app factory, lifespan, CORS
 │   ├── auth.py / user.py   signup, login, refresh, profile
-│   ├── song_requests.py    search, request, queue, status, audio streaming
+│   ├── song_requests.py    search, request, mixing, audio streaming
 │   ├── process_audio.py    ffmpeg-based audio mixing
 │   ├── models.py           SQLAlchemy models
 │   └── schemas.py          Pydantic request/response models
 ├── alembic/                migrations (baseline schema + role seed)
 ├── scripts/
 │   ├── start_postgres.ps1  starts the portable PostgreSQL server
-│   └── smoke_test.py       29-check end-to-end test suite
+│   └── smoke_test.py       35-check end-to-end test suite
 ├── dj_app/                 Flutter client
-│   ├── lib/src/            api client, session, models, websocket, audio
-│   ├── lib/screens/        login, signup, search, my requests, DJ dashboard
+│   ├── lib/src/            api client, session, models, search, playback
+│   ├── lib/screens/        login, signup, user home/search/requests/profile
 │   └── test/               unit, widget and live integration tests
 ├── .env                    local configuration (git-ignored)
 ├── alembic.ini
@@ -75,26 +81,24 @@ SECRET_KEY=<long random string>
 PUBLIC_API_BASE=
 CORS_ORIGINS=*
 YOUTUBE_API_KEY=<YouTube Data API v3 key>
-YOUTUBE_ALLOWED_CHANNEL_IDS=UCxxxxxxxxxxxxxxxxxxxxxx
+YOUTUBE_ALLOWED_CHANNEL_ID=<comma-separated channel IDs>
 ```
 
 * `PUBLIC_API_BASE` empty ⇒ media URLs are returned relative (`/requests/audio/...`).
 * Search uses YouTube Data API v3. YouTube results are playback/discovery
   tracks with a YouTube watch URL and no server audio-download URL. Audio
   processing through the existing authorized YouTube path is limited to the
-  comma-separated channel IDs in `YOUTUBE_ALLOWED_CHANNEL_IDS`; add only
-  channels whose videos you own or are authorized to process. The API key
-  enables search and metadata access; it does not authorize downloading or
-  processing audio. Other YouTube results can be played on YouTube but cannot
-  be mixed.
+  comma-separated channel IDs in `YOUTUBE_ALLOWED_CHANNEL_ID`
+  (`YOUTUBE_ALLOWED_CHANNEL_IDS` is also accepted); add only channels whose
+  videos you own or are authorized to process. The API key enables search and
+  metadata access; it does not authorize downloading or processing audio.
+  Other YouTube results can be played on YouTube but cannot be mixed.
 * Authenticated users can upload audio through `POST /tracks/assets` (also
   available in Swagger). The uploader must confirm their rights and provide
   the license and attribution. `local` assets are private to the uploader;
   `licensed` and `public_domain` assets are available in the shared catalog.
   Files are stored under a server-generated name in `music_backend/audio_assets`
   (or the configured `AUDIO_ASSET_DIR`), never at a client-supplied path.
-  The singular `YOUTUBE_ALLOWED_CHANNEL_ID` is also accepted for existing
-  `.env` files; the plural name is preferred when configuring multiple channels.
 * `CORS_ORIGINS` is a comma-separated list; `*` is safe because the API uses
   Bearer tokens only (no cookies, `allow_credentials=False`).
 
@@ -122,14 +126,18 @@ Notes:
 
 Applies three revisions:
 
-1. `e9c1e8a6176c` – baseline: 8 tables, enums, indexes
+1. `e9c1e8a6176c` – baseline: tables, enums, indexes
 2. `d66802f3171b` – seeds `role_master` with `user`, `dj`, `admin` (idempotent)
 3. `71c2a6f9b43d` – source-aware audio assets and request track metadata
 
+> The single-role change is **application-level only**. The schema still seeds
+> the `dj`/`admin` role rows and keeps the restaurant columns for backward
+> compatibility with existing data; no new migration is required.
+
+### Backend unit tests
+
 ```powershell
-.\.venv\Scripts\alembic.exe current      # should print: d66802f3171b (head)
-.\.venv\Scripts\alembic.exe downgrade base   # optional round-trip check
-.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\python.exe -m pytest music_backend/tests -q
 ```
 
 ## 5. Run the API
@@ -143,16 +151,16 @@ the schema) and prints `✅ Database connected, schema OK`.
 
 Interactive API docs: <http://127.0.0.1:8085/docs>
 
-## 6. Backend test suite
+## 6. End-to-end smoke test
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\smoke_test.py
 ```
 
-Starts its own server on `127.0.0.1:8085`, runs **29 checks** (auth, refresh,
-role guards, YouTube search, authorized-channel request lifecycle with background mixing,
-token-protected audio streaming, path-traversal defence, WebSocket auth) and
-shuts the server down again.
+Starts its own server on `127.0.0.1:8085`, runs **35 checks** (single-role auth,
+removed DJ surface, YouTube search, background mix lifecycle `pending →
+completed`, owner-scoped audio with 403/401, path-traversal defence) and shuts
+the server down again.
 
 ## 7. Flutter client
 
@@ -167,7 +175,7 @@ Builds that were verified on this machine:
 
 ```powershell
 flutter analyze                   # 0 issues
-flutter test                      # 16 tests (live API tests skip when offline)
+flutter test                      # 24 tests (live API tests skip when offline)
 flutter build windows --debug     # build\windows\x64\runner\Debug\dj_app.exe
 flutter build web --release       # build\web
 ```
@@ -184,18 +192,19 @@ flutter build windows --release --dart-define=API_BASE=http://192.168.1.10:8085
 * `src/api_client.dart` – JSON + Bearer auth, one automatic refresh-and-retry on 401
 * `src/session.dart` – login/signup/refresh/logout, persists the session
 * `src/token_store.dart` – `%APPDATA%\.dj_app\session.json` (desktop), `localStorage` (web)
-* `src/song_api.dart` – search, queue, status transitions, media URLs
-* `src/live_queue.dart` – `/ws/dj` reconnecting socket (token passed as query param)
-* `screens/` – login, signup, listener home (search + my requests), DJ dashboard
+* `src/song_api.dart` – search, request, owner-scoped request list, media URLs
+* `src/my_requests_controller.dart` – polls the user's own requests (no realtime socket)
+* `src/search_view_model.dart` – debounced, stale-safe search
+* `screens/user/` – user home, search/mix builder and My Requests
 
 > **Why pure-Dart packages only?** This Windows account has no administrator
 > rights and Developer Mode is off, so symbolic links cannot be created.
 > Flutter's native plugin tooling requires symlinks, which means packages with
 > native code (`shared_preferences`, `just_audio`, …) cannot build here.
 > Storage/playback therefore use `dart:io`, `package:web` and the standard
-> `http`/`provider`/`web_socket_channel` packages – the whole app compiles with
-> zero plugins. Enable *Settings → System → For developers → Developer Mode*,
-> then `flutter pub add shared_preferences` (or an encrypted store) works again.
+> `http`/`provider` packages – the whole app compiles with zero plugins. Enable
+> *Settings → System → For developers → Developer Mode*, then
+> `flutter pub add shared_preferences` (or an encrypted store) works again.
 
 ---
 
@@ -203,31 +212,33 @@ flutter build windows --release --dart-define=API_BASE=http://192.168.1.10:8085
 
 | Method | Path | Notes |
 |--------|------|-------|
-| POST | `/auth/signup` | `userName`, `phone`, `password`, `role` (`user`/`dj`), optional `email`, `restaurantName` |
-| POST | `/auth/login` | `identifier` (email or phone), `password`, `role` |
+| POST | `/auth/signup` | `userName`, `phone`, `password`, optional `email`; any `role` is ignored (always `user`) |
+| POST | `/auth/login` | `identifier` (email or phone), `password`; `role` optional and matched if provided |
 | POST | `/auth/refresh` | body field is **`refresh_token`** |
 | GET  | `/user/profile` | Bearer required |
 | GET  | `/requests/searchSong?q=` | YouTube Data API search, writes search history |
 | GET  | `/requests/suggestedSongs` | suggestions from past searches |
-| POST | `/requests/requestSong` | `tracks: [{trackId, sourceType}]` (1–2), `tipAmount?`, `mixer?`; only authorized YouTube or server-managed assets can mix |
-| GET | `/tracks/assets?q=` | Authenticated catalog search for local/licensed/public-domain audio |
+| POST | `/requests/requestSong` | `tracks: [{trackId, sourceType}]` (1–2), `mixer?`; returns `requestId` + `status: pending` |
+| GET  | `/requests/allSongs` | the caller's own requests (newest first); no role/queue params |
+| GET  | `/requests/audio/byRequestId/{id}` | owner-only mixed audio (403 for others, 401 without token) |
+| GET  | `/requests/audio/{filename}` | owner-only mixed audio by filename |
+| GET  | `/tracks/assets?q=` | Authenticated catalog search for local/licensed/public-domain audio |
 | POST | `/tracks/assets` | Authenticated multipart upload with title, source type, license, attribution, and rights confirmation |
-| GET | `/tracks/assets/{id}/audio?token=` | Authenticated audio playback for a server-managed asset |
-| GET  | `/requests/allSongs?mineOnly=&status=` | queue; `status` honoured for DJ/admin |
-| PUT  | `/requests/accept/{id}` / `reject/{id}` / `updateStatus/{id}` | DJ/admin only |
-| GET  | `/requests/audio/{filename}` | Bearer **or** `?token=` for media players |
-| WS   | `/ws/dj?token=` | `new_song_request` + `status_update` events |
+| GET  | `/tracks/assets/{id}/audio?token=` | Authenticated audio playback for a server-managed asset |
 
 All responses use the envelope `{statusCode, status, data}`; use `statusCode`
 for logic and `status` for the human-readable message.
+
+Request lifecycle: `pending` → (`completed` | `failed`). Playback in the Flutter
+client is enabled only when the status is `completed`/`ready` and an audio URL
+exists; failed mixes expose a **Retry** action that re-submits the same tracks.
+Legacy `accepted`/`playing`/`played` rows remain readable for old data.
 
 YouTube results use the shared Track fields `trackId`, `sourceType`, `title`,
 `artist`, `artwork`, `duration`, `playbackUrl`, `mixEligible`, `license`, and
 `attribution`. The Flutter search view provides a **Play on YouTube** action;
 playback-only tracks are not selectable for mixing. Local/library uploads can
-be searched and selected in Flutter. The first implementation intentionally
-does not include an in-app native file picker; upload through the authenticated
-API/Swagger interface.
+be searched and selected in Flutter through the authenticated API/Swagger.
 
 ---
 
@@ -243,3 +254,4 @@ API/Swagger interface.
 | `InsufficientSystemResources` / DLL blocked | Smart App Control – keep SQLAlchemy 2.0.41 |
 | Flutter plugin build fails | see the pure-Dart note above |
 | Windows exe cannot reach the API | build with `--dart-define=API_BASE=http://<host-ip>:8085` |
+| `requestSong` is slow on first call | the authorized YouTube download runs inline before the request is queued; subsequent plays use the cached file |

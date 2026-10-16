@@ -50,35 +50,32 @@ void main() {
       userName: userName,
       password: password,
       phone: phone,
-      role: 'user',
     );
     expect(session.isAuthenticated, isFalse,
         reason: 'signup does not sign the user in');
 
     // Wrong password surfaces the backend's envelope message.
     try {
-      await session.login(identifier: phone, password: 'nope', role: 'user');
+      await session.login(identifier: phone, password: 'nope');
       fail('login with a bad password should throw');
     } on ApiException catch (e) {
       expect(e.statusCode, anyOf(400, 401));
       expect(e.message, isNotEmpty);
     }
 
-    await session.login(identifier: phone, password: password, role: 'user');
+    await session.login(identifier: phone, password: password);
     expect(session.isAuthenticated, isTrue);
-    expect(session.isDj, isFalse);
     expect(session.api.accessToken, isNotNull);
 
     final api = SongApi(session.api);
 
     // Authenticated list call: a brand new user has no requests yet.
-    final mine = await api.all(mineOnly: true);
+    final mine = await api.all();
     expect(mine, isEmpty);
 
     // The login response is persisted through the store for later restore.
     expect(store.data, isNotNull);
     expect(store.data!['accessToken'], session.api.accessToken);
-    expect(store.data!['role'], 'user');
   });
 
   test('live backend: search reaches YouTube through the API', () async {
@@ -101,9 +98,8 @@ void main() {
       userName: 'it_search_$suffix',
       password: 'TestPassw0rd!',
       phone: phone,
-      role: 'user',
     );
-    await session.login(identifier: phone, password: 'TestPassw0rd!', role: 'user');
+    await session.login(identifier: phone, password: 'TestPassw0rd!');
 
     final api = SongApi(session.api);
     try {
@@ -122,6 +118,59 @@ void main() {
       // YouTube Data API availability and quota are outside this repo's control.
       // ignore: avoid_print
       print('SKIP YouTube-backed checks: ${e.message}');
+    }
+  });
+
+  test('live backend: blank search rejected and history tracks real queries',
+      () async {
+    final probe = ApiClient();
+    final online = await probe
+        .get('/')
+        .then((_) => true)
+        .catchError((_) => false)
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!online) {
+      // ignore: avoid_print
+      print('SKIP live history test: no server on 127.0.0.1:8085');
+      return;
+    }
+
+    final session = Session(api: ApiClient(), store: _MemoryStore());
+    final suffix = Random().nextInt(900000) + 100000;
+    final phone = '96$suffix';
+    await session.signUp(
+      userName: 'it_history_$suffix',
+      password: 'TestPassw0rd!',
+      phone: phone,
+    );
+    await session.login(identifier: phone, password: 'TestPassw0rd!');
+
+    final api = SongApi(session.api);
+
+    // Blank / single-character queries are rejected before hitting the provider.
+    for (final bad in ['', ' ', 'a']) {
+      try {
+        await api.search(bad);
+        fail('search("$bad") should have been rejected');
+      } on ApiException catch (e) {
+        expect(e.statusCode, 400);
+      }
+    }
+
+    // A real query is echoed back and recorded; the history endpoint is never
+    // seeded with prior query text, so it only ever contains what we searched.
+    try {
+      final results = await api.search('daft punk');
+      expect(results, isA<List<Song>>());
+
+      final history = await api.searchHistory();
+      expect(history, contains('daft punk'));
+      expect(history.toSet().length, history.length,
+          reason: 'history must be de-duplicated');
+    } on ApiException catch (e) {
+      // YouTube quota is outside this repo's control.
+      // ignore: avoid_print
+      print('SKIP history content check: ${e.message}');
     }
   });
 }
