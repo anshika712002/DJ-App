@@ -248,6 +248,13 @@ to Render's `PORT` (defaulting to `10000` for local container runs). Use the
 repository root as the service root and Docker as the runtime. `.dockerignore`
 excludes local environment files, tests, caches, and media from the image build
 context; it does not remove those files from Git.
+The Docker build verifies that the `yt-dlp` Python package, `ffmpeg`, and
+`ffprobe` are available. If an authorized YouTube download fails, check the
+Render service logs for the underlying downloader error; the API response
+intentionally stays generic.
+If yt-dlp reports “Sign in to confirm you're not a bot,” this is a YouTube
+server-side download block, not a missing FFmpeg dependency. Use an authorized
+audio upload instead; installing more system packages will not resolve it.
 
 Configure these variables in the Render service environment, never in source:
 `DATABASE_URL`, `SECRET_KEY`, `YOUTUBE_API_KEY`, and, for authorized YouTube

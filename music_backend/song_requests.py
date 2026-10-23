@@ -259,10 +259,29 @@ async def download_and_mix(
             if isinstance(res, BaseException)
         ]
         if failed_tracks:
-            logger.error("Authorized YouTube audio download failed for video IDs: %s", failed_tracks)
+            failure_messages = []
+            for track_id, result in zip(youtube_ids, download_results):
+                if isinstance(result, BaseException):
+                    failure_messages.append(str(result).casefold())
+                    logger.error(
+                        "Authorized YouTube audio download failed for video %s (%s): %s",
+                        track_id,
+                        type(result).__name__,
+                        result,
+                    )
+            if any("not a bot" in message for message in failure_messages):
+                detail = (
+                    "YouTube is blocking server-side audio downloads from this "
+                    "deployment. Use an authorized audio upload or try again later."
+                )
+            else:
+                detail = (
+                    "Could not process audio for authorized YouTube content. "
+                    "Confirm availability and FFmpeg installation."
+                )
             raise HTTPException(
                 status_code=502,
-                detail="Could not process audio for authorized YouTube content. Confirm availability and FFmpeg installation.",
+                detail=detail,
             )
 
     selected_mixer = request_data.mixer if request_data.mixer in VALID_MIXERS else "overlay"
@@ -646,4 +665,3 @@ async def get_suggested_songs(
 
     tracks = await search_youtube_videos(keyword, limit=10)
     return {"seed": keyword, "results": tracks}
-

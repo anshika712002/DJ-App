@@ -198,6 +198,80 @@ def test_request_endpoint_downloads_authorized_youtube_track(monkeypatch):
     assert downloaded == [video_id]
 
 
+def test_request_endpoint_logs_youtube_download_failure(monkeypatch, caplog):
+    video_id = "abcdefghijk"
+
+    async def video_details(_ids):
+        return {
+            video_id: {
+                "snippet": {
+                    "channelId": "UC-owned",
+                    "title": "Authorized video",
+                    "channelTitle": "My channel",
+                    "thumbnails": {},
+                },
+                "contentDetails": {"duration": "PT2M"},
+            }
+        }
+
+    def fail_download(_track_id, _folder):
+        raise RuntimeError("ffmpeg executable not found")
+
+    monkeypatch.setattr(request_module, "get_youtube_video_details", video_details)
+    monkeypatch.setattr(
+        request_module, "download_authorized_youtube_audio", fail_download
+    )
+    app = _request_app(monkeypatch, _FakeDb())
+
+    response = TestClient(app).post(
+        "/requests/requestSong",
+        json={"tracks": [{"trackId": video_id, "sourceType": "youtube"}]},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"].startswith(
+        "Could not process audio for authorized YouTube content."
+    )
+    assert "RuntimeError): ffmpeg executable not found" in caplog.text
+
+
+def test_request_endpoint_explains_youtube_bot_block(monkeypatch):
+    video_id = "abcdefghijk"
+
+    async def video_details(_ids):
+        return {
+            video_id: {
+                "snippet": {
+                    "channelId": "UC-owned",
+                    "title": "Authorized video",
+                    "channelTitle": "My channel",
+                    "thumbnails": {},
+                },
+                "contentDetails": {"duration": "PT2M"},
+            }
+        }
+
+    def fail_download(_track_id, _folder):
+        raise RuntimeError("Sign in to confirm you're not a bot.")
+
+    monkeypatch.setattr(request_module, "get_youtube_video_details", video_details)
+    monkeypatch.setattr(
+        request_module, "download_authorized_youtube_audio", fail_download
+    )
+    app = _request_app(monkeypatch, _FakeDb())
+
+    response = TestClient(app).post(
+        "/requests/requestSong",
+        json={"tracks": [{"trackId": video_id, "sourceType": "youtube"}]},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "YouTube is blocking server-side audio downloads from this deployment. "
+        "Use an authorized audio upload or try again later."
+    )
+
+
 def test_request_endpoint_accepts_server_resolved_licensed_asset(tmp_path, monkeypatch):
     asset_path = tmp_path / "licensed.wav"
     asset_path.write_bytes(b"audio data")
