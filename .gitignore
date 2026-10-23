@@ -12,6 +12,10 @@ __pycache__/
 # Secrets / local configuration
 .env
 .env.*
+*cookies*.txt
+*cookies*.json
+*.cookies
+*.cookies.txt
 
 # Logs
 *.log

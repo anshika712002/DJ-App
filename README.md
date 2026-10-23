@@ -255,6 +255,12 @@ intentionally stays generic.
 If yt-dlp reports “Sign in to confirm you're not a bot,” this is a YouTube
 server-side download block, not a missing FFmpeg dependency. Use an authorized
 audio upload instead; installing more system packages will not resolve it.
+For optional yt-dlp authentication, local Windows development checks for
+`cookies.txt` in the repository root. On Render, add that file as a Secret File
+at `/etc/secrets/cookies.txt`; the backend detects this path by default. Set
+`YTDLP_COOKIE_FILE` only when using a different path. Cookie files are ignored
+by Git and Docker and must never be committed. If no default cookie file exists,
+downloads retain their existing unauthenticated behavior.
 
 Configure these variables in the Render service environment, never in source:
 `DATABASE_URL`, `SECRET_KEY`, `YOUTUBE_API_KEY`, and, for authorized YouTube

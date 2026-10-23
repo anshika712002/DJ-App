@@ -80,9 +80,14 @@ def test_search_returns_youtube_order_and_marks_all_tracks_mixable(monkeypatch):
 
 
 def test_audio_download_runs_for_any_channel(monkeypatch, tmp_path):
+    monkeypatch.delenv("YTDLP_COOKIE_FILE", raising=False)
+    monkeypatch.setattr(
+        youtube_api, "_default_ytdlp_cookie_file", lambda: tmp_path / "missing.txt"
+    )
+
     class FakeYoutubeDL:
         def __init__(self, _options):
-            pass
+            assert "cookiefile" not in _options
 
         def __enter__(self):
             return self
@@ -102,3 +107,86 @@ def test_audio_download_runs_for_any_channel(monkeypatch, tmp_path):
 
     assert result == str(Path(tmp_path, "abcdefghijk.mp3"))
     assert Path(result).read_bytes() == b"downloaded audio"
+
+
+def test_audio_download_passes_configured_cookie_file(monkeypatch, tmp_path, caplog):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("# synthetic test cookie file\n", encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
+    caplog.set_level("INFO", logger=youtube_api.__name__)
+    captured_options = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def download(self, _urls):
+            Path(tmp_path, "abcdefghijk.mp3").write_bytes(b"downloaded audio")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    result = youtube_api.download_authorized_youtube_audio(
+        "abcdefghijk", str(tmp_path)
+    )
+
+    assert result == str(Path(tmp_path, "abcdefghijk.mp3"))
+    assert captured_options["cookiefile"] == str(cookie_file)
+    assert "yt-dlp cookie file configured: yes; readable: yes" in caplog.text
+    assert "synthetic test cookie file" not in caplog.text
+
+
+def test_configured_missing_cookie_file_fails_without_logging_path(
+    monkeypatch, tmp_path, caplog
+):
+    missing_file = tmp_path / "private-cookie-path.txt"
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", str(missing_file))
+
+    with pytest.raises(
+        youtube_api.CookieFileError,
+        match="Configured yt-dlp cookie file is unavailable.",
+    ):
+        youtube_api.download_authorized_youtube_audio(
+            "abcdefghijk", str(tmp_path / "downloads")
+        )
+
+    assert "configured: yes; readable: no" in caplog.text
+    assert str(missing_file) not in caplog.text
+
+
+def test_invalid_cookie_download_error_is_sanitized(monkeypatch, tmp_path, caplog):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("synthetic-cookie-secret", encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def download(self, _urls):
+            raise RuntimeError("invalid cookie: synthetic-cookie-secret")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    with pytest.raises(
+        youtube_api.CookieFileError,
+        match="Provide a valid Netscape cookies.txt file.",
+    ):
+        youtube_api.download_authorized_youtube_audio(
+            "abcdefghijk", str(tmp_path / "downloads")
+        )
+
+    assert "accepted: no" in caplog.text
+    assert "synthetic-cookie-secret" not in caplog.text
+    assert str(cookie_file) not in caplog.text

@@ -18,6 +18,61 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+class CookieFileError(RuntimeError):
+    """A configured yt-dlp cookie file is unavailable or invalid."""
+
+
+class _QuietYtDlpLogger:
+    def debug(self, _message: str) -> None:
+        pass
+
+    def warning(self, _message: str) -> None:
+        pass
+
+    def error(self, _message: str) -> None:
+        pass
+
+
+def _default_ytdlp_cookie_file() -> Path:
+    if os.name == "nt":
+        return Path(__file__).resolve().parents[1] / "cookies.txt"
+    return Path("/etc/secrets/cookies.txt")
+
+
+def _ytdlp_cookie_file() -> Path | None:
+    configured_path = os.getenv("YTDLP_COOKIE_FILE")
+    cookie_path = (
+        Path(configured_path).expanduser()
+        if configured_path
+        else _default_ytdlp_cookie_file()
+    )
+
+    try:
+        with cookie_path.open("rb"):
+            pass
+    except FileNotFoundError:
+        if configured_path:
+            logger.error("yt-dlp cookie file configured: yes; readable: no")
+            raise CookieFileError(
+                "Configured yt-dlp cookie file is unavailable."
+            ) from None
+        logger.info("yt-dlp cookie file configured: no; readable: no")
+        return None
+    except OSError:
+        logger.error("yt-dlp cookie file configured: yes; readable: no")
+        raise CookieFileError(
+            "Configured yt-dlp cookie file is not readable."
+        ) from None
+
+    logger.info("yt-dlp cookie file configured: yes; readable: yes")
+    return cookie_path
+
+
+def _is_cookie_file_error(error: BaseException) -> bool:
+    message = str(error).casefold()
+    return any(term in message for term in ("cookie", "cookies", "netscape"))
+
+
 def authorized_channel_ids() -> set[str]:
     configured_ids = (
         os.getenv("YOUTUBE_ALLOWED_CHANNEL_IDS")
@@ -191,12 +246,17 @@ def download_authorized_youtube_audio(
     os.makedirs(download_folder, exist_ok=True)
     output_path = os.path.join(download_folder, f"{video_id}.mp3")
     url = f"https://www.youtube.com/watch?v={video_id}"
+    if os.path.isfile(output_path):
+        return output_path
+
+    cookie_file = _ytdlp_cookie_file()
     options = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(download_folder, "%(id)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "logger": _QuietYtDlpLogger(),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -205,12 +265,23 @@ def download_authorized_youtube_audio(
             }
         ],
     }
+    if cookie_file is not None:
+        options["cookiefile"] = str(cookie_file)
 
-    if os.path.isfile(output_path):
-        return output_path
-
-    with YoutubeDL(options) as downloader:
-        downloader.download([url])
+    try:
+        with YoutubeDL(options) as downloader:
+            downloader.download([url])
+    except Exception as exc:
+        if cookie_file is not None and _is_cookie_file_error(exc):
+            logger.error(
+                "yt-dlp cookie file configured: yes; readable: yes; "
+                "accepted: no"
+            )
+            raise CookieFileError(
+                "Configured yt-dlp cookie file was rejected. "
+                "Provide a valid Netscape cookies.txt file."
+            ) from None
+        raise
 
     if not os.path.isfile(output_path):
         raise RuntimeError(f"yt-dlp did not create the audio file for {video_id}.")

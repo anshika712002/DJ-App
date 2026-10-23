@@ -12,6 +12,10 @@ __pycache__
 .env.*
 **/.env
 **/.env.*
+*cookies*.txt
+*cookies*.json
+*.cookies
+*.cookies.txt
 
 dj_app
 **/tests
