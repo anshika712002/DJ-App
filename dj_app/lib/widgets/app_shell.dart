@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import 'player_bar.dart';
 
-/// Navigation destination description shared by the bottom bar and rail.
+/// Navigation destination description shared by the bottom bar.
 class AppDestination {
   const AppDestination({
     required this.icon,
@@ -15,8 +16,9 @@ class AppDestination {
   final String label;
 }
 
-/// Responsive application shell: a bottom navigation bar on compact screens and
-/// a navigation rail with a wider content area on desktop windows.
+/// Mobile-style application shell: a compact app bar, content and the player
+/// docked above a bottom navigation bar. Wide windows are framed by
+/// `MobileFrame` in `main.dart`, so the same layout is used everywhere.
 class AppShell extends StatelessWidget {
   const AppShell({
     super.key,
@@ -41,158 +43,70 @@ class AppShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 760;
-    if (wide) {
-      return Scaffold(
-        body: Row(
-          children: [
-            _Rail(
-              destinations: destinations,
-              selectedIndex: selectedIndex,
-              onSelect: onSelect,
-              brandLabel: brandLabel,
-            ),
-            const VerticalDivider(width: 1),
-            Expanded(
-              child: Column(
-                children: [
-                  _Header(title: title, subtitle: subtitle, actions: actions),
-                  Expanded(child: body),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
+        leading: brandLabel == null ? null : const _BrandMark(),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(title, style: Theme.of(context).appBarTheme.titleTextStyle),
+            Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).appBarTheme.titleTextStyle,
+            ),
             if (subtitle != null)
               Text(
                 subtitle!,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall
                     ?.copyWith(color: AppColors.textSecondary),
               ),
           ],
         ),
-        actions: actions,
+        actions: [...actions, const SizedBox(width: 8)],
       ),
       body: body,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: selectedIndex,
-        onDestinationSelected: onSelect,
-        destinations: destinations
-            .map((d) => NavigationDestination(
-                  icon: Icon(d.icon),
-                  selectedIcon: Icon(d.selectedIcon),
-                  label: d.label,
-                ))
-            .toList(),
-      ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({required this.title, this.subtitle, this.actions = const []});
-
-  final String title;
-  final String? subtitle;
-  final List<Widget> actions;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 20, 16, 8),
-      child: Row(
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: Theme.of(context).textTheme.headlineSmall),
-                if (subtitle != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      subtitle!,
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodyMedium
-                          ?.copyWith(color: AppColors.textSecondary),
-                    ),
+          const PlayerBar(),
+          NavigationBar(
+            selectedIndex: selectedIndex,
+            onDestinationSelected: onSelect,
+            destinations: destinations
+                .map(
+                  (d) => NavigationDestination(
+                    icon: Icon(d.icon),
+                    selectedIcon: Icon(d.selectedIcon),
+                    label: d.label,
                   ),
-              ],
-            ),
+                )
+                .toList(),
           ),
-          ...actions,
         ],
       ),
     );
   }
 }
 
-class _Rail extends StatelessWidget {
-  const _Rail({
-    required this.destinations,
-    required this.selectedIndex,
-    required this.onSelect,
-    this.brandLabel,
-  });
-
-  final List<AppDestination> destinations;
-  final int selectedIndex;
-  final ValueChanged<int> onSelect;
-  final String? brandLabel;
+class _BrandMark extends StatelessWidget {
+  const _BrandMark();
 
   @override
   Widget build(BuildContext context) {
-    return NavigationRail(
-      selectedIndex: selectedIndex,
-      onDestinationSelected: onSelect,
-      labelType: NavigationRailLabelType.all,
-      backgroundColor: AppColors.surface,
-      leading: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        child: Column(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: const BoxDecoration(
-                gradient: AppColors.brandGradient,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.graphic_eq, color: Colors.white),
-            ),
-            if (brandLabel != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                brandLabel!,
-                style: Theme.of(context)
-                    .textTheme
-                    .labelSmall
-                    ?.copyWith(color: AppColors.textSecondary),
-              ),
-            ],
-          ],
+    return Center(
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: const BoxDecoration(
+          gradient: AppColors.brandGradient,
+          shape: BoxShape.circle,
         ),
+        child: const Icon(Icons.graphic_eq, color: Colors.white, size: 20),
       ),
-      destinations: destinations
-          .map((d) => NavigationRailDestination(
-                icon: Icon(d.icon),
-                selectedIcon: Icon(d.selectedIcon),
-                label: Text(d.label),
-              ))
-          .toList(),
     );
   }
 }

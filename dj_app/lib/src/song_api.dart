@@ -29,9 +29,9 @@ class SongApi {
   Future<List<String>> searchHistory() async {
     final raw = await _api.get('/requests/searchHistory');
     final queries = _map(raw)?['queries'];
-    return (queries as List<dynamic>? ?? [])
-        .whereType<String>()
-        .toList(growable: false);
+    return (queries as List<dynamic>? ?? []).whereType<String>().toList(
+      growable: false,
+    );
   }
 
   Future<List<Song>> searchAssets(String query) async {
@@ -48,10 +48,12 @@ class SongApi {
   }) async {
     final body = <String, dynamic>{
       'tracks': tracks
-          .map((track) => {
-                'trackId': track.trackId,
-                'sourceType': track.sourceType,
-              })
+          .map(
+            (track) => {
+              'trackId': track.trackId,
+              'sourceType': track.sourceType,
+            },
+          )
           .toList(),
     };
     if (tipAmount != null) body['tipAmount'] = tipAmount;
@@ -74,6 +76,10 @@ class SongApi {
         .toList();
   }
 
+  /// Media URLs carry the token themselves, so refresh it first instead of
+  /// relying on the normal 401 retry that a media player cannot perform.
+  Future<bool> ensurePlaybackSession() => _api.ensureValidToken();
+
   /// The backend accepts the token as a query parameter so media players that
   /// cannot send an Authorization header can still stream the file.
   String? audioUrl(RequestItem item) {
@@ -84,7 +90,9 @@ class SongApi {
     final uri = path.startsWith('http')
         ? Uri.parse(path)
         : Uri.parse(AppConfig.httpUrl(path));
-    return uri.replace(queryParameters: {...uri.queryParameters, 'token': token}).toString();
+    return uri
+        .replace(queryParameters: {...uri.queryParameters, 'token': token})
+        .toString();
   }
 
   String? playbackUrl(Song track) {
@@ -96,7 +104,9 @@ class SongApi {
     if (track.sourceType == 'youtube') return uri.toString();
     final token = _api.accessToken;
     if (token == null || token.isEmpty) return null;
-    return uri.replace(queryParameters: {...uri.queryParameters, 'token': token}).toString();
+    return uri
+        .replace(queryParameters: {...uri.queryParameters, 'token': token})
+        .toString();
   }
 
   static Map<String, dynamic>? _map(dynamic value) =>

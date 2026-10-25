@@ -3,9 +3,11 @@ import 'package:provider/provider.dart';
 
 import 'screens/login_screen.dart';
 import 'screens/user/user_shell.dart';
+import 'src/player_controller.dart';
 import 'src/session.dart';
 import 'src/song_api.dart';
 import 'theme/app_theme.dart';
+import 'widgets/layout.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,11 +25,16 @@ class MusicMixerApp extends StatelessWidget {
         ProxyProvider<Session, SongApi>(
           update: (_, session, _) => SongApi(session.api),
         ),
+        ChangeNotifierProvider<PlayerController>(
+          create: (_) => PlayerController(),
+        ),
       ],
       child: MaterialApp(
         title: 'Music Mixer',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(),
+        builder: (context, child) =>
+            MobileFrame(child: child ?? const SizedBox.shrink()),
         home: const RootScreen(),
       ),
     );
