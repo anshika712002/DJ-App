@@ -13,6 +13,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydub.exceptions import CouldntDecodeError
 from pydub.utils import mediainfo_json
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_utils import decode_access_token
@@ -132,6 +133,21 @@ async def upload_audio_asset(
         temporary_path.unlink(missing_ok=True)
         final_path.unlink(missing_ok=True)
         raise
+    except (SQLAlchemyError, OSError) as exc:
+        temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        try:
+            await db.rollback()
+        except (SQLAlchemyError, OSError) as rollback_error:
+            logger.error(
+                "Audio asset database rollback failed (%s).",
+                type(rollback_error).__name__,
+            )
+        logger.error("Audio asset database operation failed (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable. Please try again shortly.",
+        ) from None
     except Exception:
         temporary_path.unlink(missing_ok=True)
         final_path.unlink(missing_ok=True)

@@ -21,7 +21,7 @@ import logging
 # from sqlalchemy.ext.asyncio import AsyncSession
 # from database import get_db
 from auth import auth_router
-from database import  async_engine, Base
+from database import async_engine, wait_for_database
 from user import user_router
 from song_requests import song_request_router 
 from audio_assets import audio_asset_router
@@ -42,8 +42,8 @@ REQUIRED_TABLES = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Schema is owned by Alembic (never create_all here) so migrations stay authoritative.
     try:
+        await wait_for_database()
         async with AsyncSessionLocal() as session:
             rows = await session.execute(
                 text("select tablename from pg_tables where schemaname='public'")
@@ -51,16 +51,14 @@ async def lifespan(app: FastAPI):
             existing = {r[0] for r in rows}
         missing = [t for t in REQUIRED_TABLES if t not in existing]
         if missing:
-            print(f"❌ Database schema incomplete. Missing tables: {missing}")
-            print("   Run: .venv\\Scripts\\alembic.exe upgrade head")
-        else:
-            print("✅ Database connected, schema OK (managed by Alembic)")
-    except Exception as e:
-        logger.error("Database startup check failed (%s)", type(e).__name__)
-        print("   Check DATABASE_URL in .env and that PostgreSQL is running "
-              "(scripts\\start_postgres.ps1)")
-    yield
-    await async_engine.dispose()
+            logger.error("Database schema is incomplete; missing tables: %s", missing)
+            raise RuntimeError(
+                "Database schema is incomplete. Review migrations before starting the API."
+            )
+        logger.info("Database connected and schema verified.")
+        yield
+    finally:
+        await async_engine.dispose()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -108,7 +106,7 @@ async def health_ready():
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         logger.warning("Database readiness check failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     return {"status": "ok", "database": "ok"}

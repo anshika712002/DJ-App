@@ -1,3 +1,4 @@
+import http.cookiejar
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+YTDLP_COOKIE_EXPIRY = re.compile(rb"[0-9]+\Z")
 logger = logging.getLogger(__name__)
 
 # HTTPX's INFO request log includes the full URL, including the YouTube API key.
@@ -37,6 +39,55 @@ def _default_ytdlp_cookie_file() -> Path:
     if os.name == "nt":
         return Path(__file__).resolve().parents[1] / "cookies.txt"
     return Path("/etc/secrets/cookies.txt")
+
+
+def _ytdlp_cookie_file_diagnostics(
+    cookie_path: Path,
+) -> tuple[bool, int, str | None]:
+    try:
+        content = cookie_path.read_bytes()
+    except OSError:
+        return False, 0, "read_error"
+
+    lines = content.splitlines()
+    header = lines[0] if lines else b""
+    has_utf8_bom = header.startswith(b"\xef\xbb\xbf")
+    failure_reason = "utf8_bom" if has_utf8_bom else None
+
+    try:
+        header_text = header.decode("utf-8")
+    except UnicodeDecodeError:
+        header_valid = False
+        failure_reason = failure_reason or "invalid_utf8"
+    else:
+        header_valid = bool(http.cookiejar.NETSCAPE_MAGIC_RGX.match(header_text))
+        if not header_valid:
+            failure_reason = failure_reason or "invalid_header"
+
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        failure_reason = failure_reason or "invalid_utf8"
+
+    record_count = 0
+    for line in lines[1:]:
+        if line.startswith(b"#HttpOnly_"):
+            line = line[len(b"#HttpOnly_"):]
+        elif line.startswith(b"#") or not line.strip():
+            continue
+
+        if not line.strip():
+            continue
+        record_count += 1
+        fields = line.split(b"\t")
+        if len(fields) != 7:
+            failure_reason = failure_reason or "invalid_field_count"
+        elif fields[4] and not YTDLP_COOKIE_EXPIRY.fullmatch(fields[4]):
+            failure_reason = failure_reason or "invalid_expiry"
+        elif (fields[1] == b"TRUE") != fields[0].startswith(b"."):
+            failure_reason = failure_reason or "invalid_domain_flag"
+
+    return header_valid, record_count, failure_reason
 
 
 def _ytdlp_cookie_file() -> Path | None:
@@ -65,12 +116,24 @@ def _ytdlp_cookie_file() -> Path | None:
         ) from None
 
     logger.info("yt-dlp cookie file configured: yes; readable: yes")
+    header_valid, record_count, failure_reason = _ytdlp_cookie_file_diagnostics(
+        cookie_path
+    )
+    if failure_reason is not None:
+        logger.error(
+            "yt-dlp cookie file validation failed: header_valid=%s; "
+            "record_count=%d; failure_reason=%s",
+            "yes" if header_valid else "no",
+            record_count,
+            failure_reason,
+        )
+        raise CookieFileError("Configured yt-dlp cookie file is invalid.")
+    logger.info(
+        "yt-dlp cookie file validation passed: header_valid=%s; record_count=%d",
+        "yes" if header_valid else "no",
+        record_count,
+    )
     return cookie_path
-
-
-def _is_cookie_file_error(error: BaseException) -> bool:
-    message = str(error).casefold()
-    return any(term in message for term in ("cookie", "cookies", "netscape"))
 
 
 def authorized_channel_ids() -> set[str]:
@@ -239,6 +302,14 @@ def download_authorized_youtube_audio(
     video_id: str, download_folder: str
 ) -> str:
     from yt_dlp import YoutubeDL
+    from yt_dlp import cookies as yt_dlp_cookies
+
+    cookie_load_errors = (http.cookiejar.LoadError,)
+    cookie_load_error = getattr(yt_dlp_cookies, "CookieLoadError", None)
+    if isinstance(cookie_load_error, type) and issubclass(
+        cookie_load_error, BaseException
+    ):
+        cookie_load_errors += (cookie_load_error,)
 
     if not YOUTUBE_VIDEO_ID.fullmatch(video_id):
         raise ValueError("Invalid YouTube video ID.")
@@ -271,11 +342,17 @@ def download_authorized_youtube_audio(
     try:
         with YoutubeDL(options) as downloader:
             downloader.download([url])
-    except Exception as exc:
-        if cookie_file is not None and _is_cookie_file_error(exc):
+    except cookie_load_errors:
+        if cookie_file is not None:
+            header_valid, record_count, _ = _ytdlp_cookie_file_diagnostics(
+                cookie_file
+            )
             logger.error(
                 "yt-dlp cookie file configured: yes; readable: yes; "
-                "accepted: no"
+                "accepted: no; header_valid=%s; record_count=%d; "
+                "failure_reason=yt_dlp_parser_rejected",
+                "yes" if header_valid else "no",
+                record_count,
             )
             raise CookieFileError(
                 "Configured yt-dlp cookie file was rejected. "

@@ -102,20 +102,27 @@ YOUTUBE_ALLOWED_CHANNEL_ID=<comma-separated channel IDs>
 * `CORS_ORIGINS` is a comma-separated list; `*` is safe because the API uses
   Bearer tokens only (no cookies, `allow_credentials=False`).
 
-## 3. PostgreSQL
+## 3. PostgreSQL startup
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start_postgres.ps1
+.\.venv\Scripts\python.exe scripts\register_postgres_autostart.py
 ```
 
-Notes:
+This one-time, per-user setup starts the existing PostgreSQL 17 cluster under
+`%LOCALAPPDATA%\pgsql17\data` when you sign in. It first tries to update the
+existing user logon task and falls back to a per-user Startup-folder entry if
+Task Scheduler denies access. No database, role, or cluster is created.
+The script checks the cluster version, configured data directory, port, and
+loopback-only listen address; it will not remove a PID file or take over a port
+owned by another process. PostgreSQL logs are written under
+`%LOCALAPPDATA%\pgsql17\logs`.
 
-* The script launches the existing `postgres.exe` directly from the scheduled
-  task, using the cluster in `C:\ProgramData\pgsql17\data`. It does not register
-  a Windows service or change Windows security policy.
-* The readiness probe is a plain TCP check – never use
-  `psql -U postgres -h 127.0.0.1`: the superuser has no password and the
-  client blocks forever on an interactive prompt.
+On this machine, Task Scheduler denied changes to two older tasks:
+`DJApp_PG_AutoStart` and `DJApp_StartPG`. The Startup-folder entry works without
+those tasks, but an administrator must disable the two old tasks once in Task
+Scheduler to remove duplicate startup actions. Do not use PowerShell execution
+policy bypasses. The project does not disable or bypass Windows security
+policies.
 * Application login uses the non-superuser role `djapp` with scram-sha-256.
 
 ## 4. Database migrations
@@ -143,11 +150,14 @@ Applies three revisions:
 ## 5. Run the API
 
 ```powershell
-cd music_backend
-..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8085
+.\.venv\Scripts\python.exe scripts\start_backend.py
 ```
-On startup the app verifies the schema (it never calls `create_all`; Alembic owns
-the schema) and prints `✅ Database connected, schema OK`.
+
+The launcher checks/starts PostgreSQL, verifies `SELECT 1` through the
+configured async SQLAlchemy connection, and then starts Uvicorn on
+`127.0.0.1:8085`. FastAPI repeats a bounded database check during lifespan and
+refuses to serve requests if PostgreSQL or the required Alembic-managed tables
+are unavailable. It never calls `create_all`.
 
 Interactive API docs: <http://127.0.0.1:8085/docs>
 
@@ -259,8 +269,11 @@ For optional yt-dlp authentication, local Windows development checks for
 `cookies.txt` in the repository root. On Render, add that file as a Secret File
 at `/etc/secrets/cookies.txt`; the backend detects this path by default. Set
 `YTDLP_COOKIE_FILE` only when using a different path. Cookie files are ignored
-by Git and Docker and must never be committed. If no default cookie file exists,
-downloads retain their existing unauthenticated behavior.
+by Git and Docker and must never be committed. Before using a configured file,
+the backend validates its Netscape header and cookie-row structure. Diagnostic
+logs include only header validity, the record count, and a sanitized failure
+reason; cookie names and values are never logged. If no default cookie file
+exists, downloads retain their existing unauthenticated behavior.
 
 Configure these variables in the Render service environment, never in source:
 `DATABASE_URL`, `SECRET_KEY`, `YOUTUBE_API_KEY`, and, for authorized YouTube
@@ -289,7 +302,7 @@ wake it.
 | Symptom | Fix |
 |---------|-----|
 | `ModuleNotFoundError: No module named 'auth'` | run uvicorn from `music_backend/` (flat imports) or set `PYTHONPATH=music_backend` |
-| Backend exits with `0xC0000142` | start PostgreSQL with `scripts\start_postgres.ps1` (outside the Job Object) |
+| Backend startup fails | run `.\.venv\Scripts\python.exe scripts\start_backend.py` and review `%LOCALAPPDATA%\pgsql17\logs` |
 | `psql -U postgres` hangs | superuser has no password; use `-U djapp` with `PGPASSWORD`, or a TCP probe |
 | `ffmpeg` not found | refresh `$env:Path` from the registry after installing (`[Environment]::GetEnvironmentVariable("Path","User")`) |
 | `UnicodeEncodeError` in logs | fixed in `music_backend/main.py` (stdout reconfigured to UTF-8) |

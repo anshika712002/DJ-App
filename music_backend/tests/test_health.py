@@ -50,3 +50,16 @@ def test_health_ready_returns_503_when_database_is_unavailable(monkeypatch):
         asyncio.run(main_module.health_ready())
 
     assert exc.value.status_code == 503
+
+
+def test_health_ready_returns_503_when_connection_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "AsyncSessionLocal",
+        lambda: _Session(ConnectionRefusedError("synthetic refusal")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main_module.health_ready())
+
+    assert exc.value.status_code == 503

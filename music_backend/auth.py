@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
 from database import get_db
 from models import User, RefreshToken, RoleMaster
 from auth_utils import (
@@ -91,13 +92,21 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
             ).dict()
         )
 
-    except Exception as e:
+    except (SQLAlchemyError, OSError) as exc:
+        logger.error("Signup database operation failed (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable. Please try again shortly.",
+        ) from None
+    except Exception:
         logger.exception("Signup failed")
-        return format_response(500, "Internal Server Error", {"error": str(e)})
+        return format_response(
+            500, "Internal Server Error", {"error": "Unexpected server error"}
+        )
 
     finally:
         duration = time.time() - start_time
-        logger.info("✅ Signup completed in %.2f seconds for %s", duration, user_data.userName)
+        logger.info("Signup request finished in %.2f seconds", duration)
 
 
 @auth_router.post("/login")
@@ -171,13 +180,23 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
             ).dict()
         )
 
-    except Exception as e:
+    except (SQLAlchemyError, OSError) as exc:
+        logger.error("Login database operation failed (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable. Please try again shortly.",
+        ) from None
+    except Exception:
         logger.exception("Login failed")
-        return format_response(500, "Login failed due to server error", {"error": str(e)})
+        return format_response(
+            500,
+            "Login failed due to server error",
+            {"error": "Unexpected server error"},
+        )
 
     finally:
         duration = time.time() - start_time
-        logger.info("✅ Login completed in %.2f seconds for %s", duration, user_data.identifier)
+        logger.info("Login request finished in %.2f seconds", duration)
 
 
 @auth_router.get("/protected")

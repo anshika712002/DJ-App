@@ -1,10 +1,22 @@
 import asyncio
+import http.cookiejar
 from pathlib import Path
 
 import pytest
 import yt_dlp
+from yt_dlp.cookies import CookieLoadError
 
 from music_backend import youtube_api
+
+
+def _netscape_cookie_file(count=1, newline="\n"):
+    lines = ["# Netscape HTTP Cookie File"]
+    lines.extend(
+        f".example{index}.test\tTRUE\t/\tTRUE\t0\tSYNTHETIC_NAME_{index}"
+        "\tSYNTHETIC_VALUE"
+        for index in range(count)
+    )
+    return newline.join(lines) + newline
 
 
 def test_duration_seconds_parses_youtube_iso_duration():
@@ -111,7 +123,7 @@ def test_audio_download_runs_for_any_channel(monkeypatch, tmp_path):
 
 def test_audio_download_passes_configured_cookie_file(monkeypatch, tmp_path, caplog):
     cookie_file = tmp_path / "cookies.txt"
-    cookie_file.write_text("# synthetic test cookie file\n", encoding="utf-8")
+    cookie_file.write_bytes(_netscape_cookie_file(22, "\r\n").encode("utf-8"))
     monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
     caplog.set_level("INFO", logger=youtube_api.__name__)
     captured_options = {}
@@ -138,7 +150,88 @@ def test_audio_download_passes_configured_cookie_file(monkeypatch, tmp_path, cap
     assert result == str(Path(tmp_path, "abcdefghijk.mp3"))
     assert captured_options["cookiefile"] == str(cookie_file)
     assert "yt-dlp cookie file configured: yes; readable: yes" in caplog.text
-    assert "synthetic test cookie file" not in caplog.text
+    assert "validation passed: header_valid=yes; record_count=22" in caplog.text
+    assert "SYNTHETIC_VALUE" not in caplog.text
+
+
+def test_netscape_fixture_is_accepted_by_installed_ytdlp_parser(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_bytes(_netscape_cookie_file(22, "\r\n").encode("utf-8"))
+
+    cookie_jar = yt_dlp.cookies.YoutubeDLCookieJar(str(cookie_file))
+    cookie_jar.load()
+
+    assert len(cookie_jar) == 22
+
+
+@pytest.mark.parametrize(
+    ("content", "header_valid", "failure_reason"),
+    [
+        (
+            "# Not a Netscape file\n"
+            ".example.test\tTRUE\t/\tTRUE\t0\tSYNTHETIC_NAME\tSYNTHETIC_VALUE\n",
+            "no",
+            "invalid_header",
+        ),
+        (
+            "# Netscape HTTP Cookie File\n"
+            ".example.test\tTRUE\t/\tTRUE\t0\tSYNTHETIC_NAME\n",
+            "yes",
+            "invalid_field_count",
+        ),
+        (
+            "# Netscape HTTP Cookie File\n"
+            ".example.test\tTRUE\t/\tTRUE\tinvalid\tSYNTHETIC_NAME\tSYNTHETIC_VALUE\n",
+            "yes",
+            "invalid_expiry",
+        ),
+        (
+            "# Netscape HTTP Cookie File\n"
+            ".example.test\tTRUE\t/\tTRUE\t123.5\tSYNTHETIC_NAME\tSYNTHETIC_VALUE\n",
+            "yes",
+            "invalid_expiry",
+        ),
+        (
+            "# Netscape HTTP Cookie File\n"
+            ".example.test\tFALSE\t/\tTRUE\t0\tSYNTHETIC_NAME\tSYNTHETIC_VALUE\n",
+            "yes",
+            "invalid_domain_flag",
+        ),
+        (
+            "\ufeff# Netscape HTTP Cookie File\n"
+            ".example.test\tTRUE\t/\tTRUE\t0\tSYNTHETIC_NAME\tSYNTHETIC_VALUE\n",
+            "no",
+            "utf8_bom",
+        ),
+        (
+            b"# Netscape HTTP Cookie File\n"
+            b".example.test\tTRUE\t/\tTRUE\t0\tSYNTHETIC_NAME\t\xff\n",
+            "yes",
+            "invalid_utf8",
+        ),
+    ],
+)
+def test_invalid_cookie_file_logs_sanitized_diagnostics(
+    monkeypatch, tmp_path, caplog, content, header_valid, failure_reason
+):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_bytes(
+        content if isinstance(content, bytes) else content.encode("utf-8")
+    )
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
+    caplog.set_level("INFO", logger=youtube_api.__name__)
+
+    with pytest.raises(
+        youtube_api.CookieFileError,
+        match="Configured yt-dlp cookie file is invalid.",
+    ):
+        youtube_api._ytdlp_cookie_file()
+
+    assert f"header_valid={header_valid}" in caplog.text
+    assert "record_count=1" in caplog.text
+    assert f"failure_reason={failure_reason}" in caplog.text
+    assert "SYNTHETIC_NAME" not in caplog.text
+    assert "SYNTHETIC_VALUE" not in caplog.text
 
 
 def test_configured_missing_cookie_file_fails_without_logging_path(
@@ -159,9 +252,14 @@ def test_configured_missing_cookie_file_fails_without_logging_path(
     assert str(missing_file) not in caplog.text
 
 
-def test_invalid_cookie_download_error_is_sanitized(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize(
+    "cookie_load_error", [CookieLoadError, http.cookiejar.LoadError]
+)
+def test_invalid_cookie_download_error_is_sanitized(
+    monkeypatch, tmp_path, caplog, cookie_load_error
+):
     cookie_file = tmp_path / "cookies.txt"
-    cookie_file.write_text("synthetic-cookie-secret", encoding="utf-8")
+    cookie_file.write_text(_netscape_cookie_file(), encoding="utf-8")
     monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
 
     class FakeYoutubeDL:
@@ -175,7 +273,7 @@ def test_invalid_cookie_download_error_is_sanitized(monkeypatch, tmp_path, caplo
             return False
 
         def download(self, _urls):
-            raise RuntimeError("invalid cookie: synthetic-cookie-secret")
+            raise cookie_load_error("failed to load cookies: synthetic-cookie-secret")
 
     monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
@@ -190,3 +288,35 @@ def test_invalid_cookie_download_error_is_sanitized(monkeypatch, tmp_path, caplo
     assert "accepted: no" in caplog.text
     assert "synthetic-cookie-secret" not in caplog.text
     assert str(cookie_file) not in caplog.text
+
+
+def test_unrelated_error_mentioning_cookies_is_not_mislabeled(
+    monkeypatch, tmp_path, caplog
+):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(_netscape_cookie_file(), encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIE_FILE", str(cookie_file))
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def download(self, _urls):
+            raise RuntimeError("unrelated downloader issue mentioning cookies")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    with pytest.raises(
+        RuntimeError, match="unrelated downloader issue mentioning cookies"
+    ):
+        youtube_api.download_authorized_youtube_audio(
+            "abcdefghijk", str(tmp_path / "downloads")
+        )
+
+    assert "accepted: no" not in caplog.text
